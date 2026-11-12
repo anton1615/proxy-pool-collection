@@ -1,0 +1,65 @@
+# shared-mihomo: one host-wide mihomo, nodes from the local vpngate-hub publish
+# file (zero Cloudflare traffic). Copy to config.yaml and edit paths/ports.
+# The mihomo binary must understand openvpn proxy nodes (v1.19.31+).
+external-controller: 127.0.0.1:7910
+mode: rule
+log-level: warning
+allow-lan: false
+
+proxy-providers:
+  hub:
+    type: file
+    path: ./providers/hub-nodes.yaml
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 600
+
+# One select group per listener port. Add more p79XX groups/listeners as needed;
+# keep the port range in sync with register.py SHARED_MIHOMO_PORT_BASE/END.
+proxy-groups:
+  - name: p7911
+    type: select
+    use: [hub]
+  - name: p7912
+    type: select
+    use: [hub]
+  - name: p7913
+    type: select
+    use: [hub]
+  - name: p7914
+    type: select
+    use: [hub]
+  - name: p7915
+    type: select
+    use: [hub]
+
+listeners:
+  - name: p7911
+    type: mixed
+    listen: 127.0.0.1
+    port: 7911
+    proxy: p7911
+  - name: p7912
+    type: mixed
+    listen: 127.0.0.1
+    port: 7912
+    proxy: p7912
+  - name: p7913
+    type: mixed
+    listen: 127.0.0.1
+    port: 7913
+    proxy: p7913
+  - name: p7914
+    type: mixed
+    listen: 127.0.0.1
+    port: 7914
+    proxy: p7914
+  - name: p7915
+    type: mixed
+    listen: 127.0.0.1
+    port: 7915
+    proxy: p7915
+
+rules:
+  - MATCH,DIRECT
