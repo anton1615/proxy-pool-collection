@@ -58,13 +58,9 @@ main{flex:1;display:flex;flex-direction:column;min-width:0}
   <div id="err"></div>
   <iframe id="frame" title="pool dashboard"></iframe>
 </main>
+<script src="/pools.js"></script>
 <script>
-const POOLS = {
-  foxy: {label: "FoxyVPN",   path: "/p/foxy/sesame-foxyvpn-dashboard/"},
-  urn:  {label: "URnetwork", path: "/p/urn/urn-dashboard/"},
-  ws:   {label: "Windscribe",path: "/p/ws/windscribe-dashboard/"},
-  vg:   {label: "VPNGate",   path: "/p/vg/"}
-};
+// POOLS is defined by /pools.js, generated from the server's config.json.
 const frame = document.getElementById("frame");
 const err = document.getElementById("err");
 
