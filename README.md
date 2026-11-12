@@ -98,11 +98,11 @@ Two layers, both self-contained:
 |---|---|---|
 | 🦊 FoxyVPN | `pools/foxyvpn-pool/` (subtree, pinned) | upstream embedded `UI_HTML` |
 | 🌀 URnetwork | `pools/urn-pool/` (subtree, pinned) | upstream embedded `UI_HTML` |
-| 🐋 Windscribe | `pools/windscribe-pool/` (subtree, pinned) | `windscribe-host-webui/` deployed snapshot |
+| 🐋 Windscribe | `pools/windscribe-pool/` (subtree, pinned) | upstream embedded `UI_HTML` |
 | 🌐 VPNGate | `shared-mihomo/` (first-party) | `shared-mihomo/webui/ui.html` |
 
 Three upstream pools are vendored **byte-identical** as git subtrees pinned to
-SHAs recorded in [`docs/RECON.md`](docs/RECON.md). The rewind point for every
+SHAs pinned in each subtree. The rewind point for every
 upstream update is one subtree; the byte-identical diff is the safety net.
 
 The VPNGate/shared-mihomo half is first-party: HTTP API (`register.py`), mihomo
@@ -183,7 +183,7 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 - The VPNGate hub consumes only official public VPNGate sources — the official
   CSV endpoint and the official client data-file endpoint. No third-party
   credential extracted from a decompiled binary, no GP pipeline, no Cloudflare
-  KV push, no keyed/scraped risk scoring. `docs/RECON.md` records the inventory.
+  KV push, no keyed/scraped risk scoring.
 - Credentials (CA/cert/key, foxyvpn tokens, urn seedphrases, windscribe accounts)
   are **never** committed; `scripts/sanitize_scan.py` enforces this for
   first-party files.
@@ -197,13 +197,14 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 ├── webui/                      # the unified shell
 │   ├── server.py               # stdlib reverse proxy (SSRF-safe)
 │   ├── index.html              # left-sidebar tab shell
-│   ├── windscribe_host.py      # launcher for the host snapshot
-│   ├── config.example.json
+│   ├── windscribe_host.py      # serves the Windscribe host snapshot
+│   └── config.example.json
 ├── pools/
 │   ├── foxyvpn-pool/           # subtree · pinned · upstream untouched
 │   ├── urn-pool/              # subtree · pinned · upstream untouched
 │   └── windscribe-pool/        # subtree · pinned · upstream untouched
-├── windscribe-host-webui/     # deployed host snapshot (upstream main has no UI)
+├── (local only, not tracked)
+│   └── windscribe-host-webui/  # deployed Windscribe UI snapshot
 ├── shared-mihomo/             # first-party, sanitized
 │   ├── api/register.py        # uid→port→node, rotate, delete
 │   ├── mihomo/                # config.yaml.example, gen-provider.py, units
@@ -211,9 +212,7 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 │   ├── speed/                 # vpngate-speed.py · public sources only
 │   └── webui/                 # VPNGate Rotate dashboard (ui.html)
 ├── docs/
-│   ├── RECON.md              # verified inventory of all four pools
-│   ├── images/dashboard-windscribe.png   # masked
-│   └── plans/
+│   └── images/dashboard-windscribe.png   # masked
 ├── scripts/sanitize_scan.py
 └── tests/
 ```
@@ -242,5 +241,4 @@ what is committed, never the original.
 - shared-mihomo, vpngate-hub, vpngate-speed, the unified shell and the VPNGate
   dashboard — first-party components (MIT)
 
-See [`docs/RECON.md`](docs/RECON.md) for the verified inventory and
-[`docs/plans/`](docs/plans/) for the implementation plan.
+Internal inventory and implementation plan are kept local and untracked; this repo ships the service architecture only.

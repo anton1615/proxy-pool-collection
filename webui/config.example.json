@@ -7,7 +7,7 @@
     "foxy": {
       "label": "FoxyVPN",
       "upstream": "http://127.0.0.1:8080",
-      "ui_path": "sesame-foxyvpn-dashboard"
+      "ui_path": "foxyvpn-dashboard"
     },
     "urn": {
       "label": "URnetwork",

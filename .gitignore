@@ -27,3 +27,8 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Operator-only internal docs & host snapshot (kept in working tree, never in public Git)
+docs/RECON.md
+docs/plans/
+windscribe-host-webui/
