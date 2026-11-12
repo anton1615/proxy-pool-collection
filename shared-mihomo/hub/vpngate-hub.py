@@ -24,12 +24,7 @@ import io
 import json
 import os
 import re
-import socket
-import struct
 import sys
-import time
-import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -43,7 +38,6 @@ CLIENT_URL = os.environ.get("HUB_CLIENT_URL", "http://client.api.vpngate2.jp/api
 PROBE_TIMEOUT = float(os.environ.get("HUB_PROBE_TIMEOUT", "3"))
 PROBE_CONCURRENCY = int(os.environ.get("HUB_PROBE_CONCURRENCY", "64"))
 PUBLISH_MAX = int(os.environ.get("HUB_PUBLISH_MAX", "4000"))
-TIMEOUT = (10, 30)
 
 SOURCE_ORDER = ["official_csv", "official_client", "inbox"]
 PRIORITY = {"official_csv": 30, "official_client": 45, "inbox": 10}
@@ -73,9 +67,9 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def http_get(url, label, timeout=TIMEOUT):
+def http_get(url, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout[1]) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
@@ -102,7 +96,7 @@ def parse_ovpn(text):
 
 def fetch_official_csv():
     """Official CSV endpoint; each row carries a base64 .ovpn blob."""
-    raw = http_get(CSV_URL, "official_csv")
+    raw = http_get(CSV_URL)
     rows = []
     for line in raw.decode("utf-8", "replace").splitlines():
         if line.startswith("#") or not line.strip() or line.startswith("HostName"):
@@ -139,8 +133,9 @@ def fetch_official_csv():
                     pass
         except Exception:
             pass
-        rec.update({k: v for k, v in parse_ovpn(ovpn).items()
-                    if k in ("ip", "tcp_port", "udp_port")})
+        p = parse_ovpn(ovpn)
+        if p.get("ip"):
+            rec["ip"] = p["ip"]
         if RE_IP.match(rec.get("ip", "")):
             out.append(rec)
     return out
@@ -168,7 +163,7 @@ def fetch_official_client():
     The obfuscation is a documented property of the official client protocol;
     no credentials or decompiled keys are involved.
     """
-    raw = http_get(CLIENT_URL, "official_client")
+    raw = http_get(CLIENT_URL)
     key = hashlib.sha1(b"vpngate-client-data").digest()[:16]
     data = _rc4(key, raw)
     text = data.decode("utf-8", "replace")
@@ -258,10 +253,11 @@ def merge_sources(records_by_source):
                         cur[k] = v
     return merged
 
-
 async def probe(ip, port):
     try:
-        await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=PROBE_TIMEOUT)
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=PROBE_TIMEOUT)
+        writer.close()
         return True
     except Exception:
         return False
