@@ -28,9 +28,36 @@ FORWARD_RESP_HEADERS = {"Content-Type", "Content-Length", "Cache-Control",
                         "ETag", "Last-Modified", "Expires"}
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+_CONFIG_CACHE = {"key": None, "cfg": None}
+
+
 def load_config():
-    with open(CONFIG_PATH, encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        st = os.stat(CONFIG_PATH)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        if _CONFIG_CACHE["cfg"] is not None:
+            return _CONFIG_CACHE["cfg"]
+        raise
+    if key != _CONFIG_CACHE["key"]:
+        with open(CONFIG_PATH, encoding="utf-8") as fh:
+            _CONFIG_CACHE["cfg"] = json.load(fh)
+        _CONFIG_CACHE["key"] = key
+    return _CONFIG_CACHE["cfg"]
+
+
+def forward_headers(hdrs, pool):
+    extra = {k: v for k, v in hdrs.items() if k in FORWARD_RESP_HEADERS}
+    loc = hdrs.get("Location")
+    if loc and loc.startswith("/") and not loc.startswith("//"):
+        extra["Location"] = "/p/%s/%s" % (pool, loc.lstrip("/"))
+    return extra
 
 
 def host_allowed(cfg, handler):
@@ -125,30 +152,13 @@ class Handler(BaseHTTPRequestHandler):
         data = self.rfile.read(length) if length else None
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
 
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, hdrs, newurl):
-                return None
-
-        opener = urllib.request.build_opener(NoRedirect)
         try:
-            with opener.open(req, timeout=30) as resp:
-                body = resp.read()
-                extra = {k: v for k, v in resp.headers.items() if k in FORWARD_RESP_HEADERS}
-                loc = resp.headers.get("Location")
-                if loc:
-                    # Only rewrite same-origin relative redirects; drop cross-origin.
-                    if loc.startswith("/") and not loc.startswith("//"):
-                        extra["Location"] = "/p/%s/%s" % (pool, loc.lstrip("/"))
-                    else:
-                        extra.pop("Location", None)
-                self._send(resp.status, body, extra=extra)
+            with OPENER.open(req, timeout=30) as resp:
+                self._send(resp.status, resp.read(),
+                           extra=forward_headers(resp.headers, pool))
         except urllib.error.HTTPError as exc:
-            body = exc.read()
-            extra = {k: v for k, v in exc.headers.items() if k in FORWARD_RESP_HEADERS}
-            loc = exc.headers.get("Location")
-            if loc and loc.startswith("/") and not loc.startswith("//"):
-                extra["Location"] = "/p/%s/%s" % (pool, loc.lstrip("/"))
-            self._send(exc.code, body, extra=extra)
+            self._send(exc.code, exc.read(),
+                       extra=forward_headers(exc.headers, pool))
         except Exception as exc:
             self._send(502, "upstream unreachable: %s" % repr(exc))
 

@@ -139,8 +139,16 @@ async function api(url) {
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+let lastState = "";
 async function refresh() {
-  try { S = await api(API); render(); }
+  try {
+    const next = await api(API);
+    const raw = JSON.stringify(next);
+    if (raw === lastState) return;  // no DOM churn when nothing changed
+    lastState = raw;
+    S = next;
+    render();
+  }
   catch (e) { toast("載入失敗：" + e.message, true); }
 }
 async function rotate(uid) {

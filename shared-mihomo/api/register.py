@@ -8,13 +8,14 @@
   GET /status             -> 現有 uid 對照表
   GET /delete?uid=N       -> 釋放 port
 """
-import json, os, random, sys, threading, time, urllib.request
+import json, os, random, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("SHARED_MIHOMO_REG_STATE", os.path.join(BASE, "register.json"))
 API = os.environ.get("SHARED_MIHOMO_API", "http://127.0.0.1:7910")
+API_HOST = API.split("//", 1)[-1].split(":")[0]
 PORTS = list(range(int(os.environ.get("SHARED_MIHOMO_PORT_BASE", "7911")),
                    int(os.environ.get("SHARED_MIHOMO_PORT_END", "7931"))))
 # rotate 後斬掉這個 port 上閒置的 keep-alive 連線,讓下一個請求必走新節點(新出口 IP)。
@@ -28,13 +29,15 @@ _log = lambda *a: print(time.strftime("[%H:%M:%S]"), *a, flush=True)
 
 def _state():
     try:
-        return json.load(open(STATE, encoding="utf-8"))
+        with open(STATE, encoding="utf-8") as fh:
+            return json.load(fh)
     except Exception:
         return {}
 
 def _save(d):
     tmp = STATE + ".tmp"
-    json.dump(d, open(tmp, "w", encoding="utf-8"), indent=1, sort_keys=True)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(d, fh, indent=1, sort_keys=True)
     os.replace(tmp, STATE)
 
 def _ctrl(path, payload=None, method=None):
@@ -54,12 +57,10 @@ def _node_names():
     return [p["name"] for p in _nodes()]
 
 def _pin(port, name=None, alive_only=True):
-    names = _node_names()
+    nodes = _nodes()
+    names = [p["name"] for p in nodes]
     if alive_only:
-        try:
-            al = [x["name"] for x in _nodes() if x.get("alive", False)]
-        except Exception:
-            al = names
+        al = [p["name"] for p in nodes if p.get("alive", False)] or names
     else:
         al = names
     if not al:
@@ -85,18 +86,20 @@ def _idle_tracker():
             with LOCK:
                 for cid, (up, down) in live.items():
                     tr = _IDLE.get(cid)
-                    if tr is None:
+                    if tr is None or tr["down"] != down:
                         _IDLE[cid] = {"last_down": now, "down": down}
-                    elif down != tr["down"]:
-                        _IDLE[cid] = {"last_down": now, "down": down}
-                    else:
-                        tr["down"] = down
                 for cid in list(_IDLE):
                     if cid not in live:
                         _IDLE.pop(cid, None)
-        except Exception:
-            pass
+        except Exception as e:
+            msg = repr(e)
+            if msg != _idle_tracker.last_error:
+                _log("idle tracker controller error:", msg)
+                _idle_tracker.last_error = msg
         time.sleep(1.0)
+
+
+_idle_tracker.last_error = None
 
 
 def _kill_idle_conns(port):
@@ -149,7 +152,8 @@ class H(BaseHTTPRequestHandler):
         uid = q.get("uid", "").strip()
         try:
             if u.path == "/nodes":
-                return self._send(200, {"count": len(_node_names()), "nodes": _node_names()})
+                names = _node_names()
+                return self._send(200, {"count": len(names), "nodes": names})
             with LOCK:
                 st = _state()
                 if u.path == "/status":
@@ -160,7 +164,7 @@ class H(BaseHTTPRequestHandler):
                 if u.path == "/register":
                     if uid in st:
                         return self._send(200, {"uid": uid, "port": st[uid]["port"], "note": "already registered",
-                                                "proxy": "http://%s:%d" % (API.split("//")[1].split(":")[0], st[uid]["port"])})
+                                                "proxy": "http://%s:%d" % (API_HOST, st[uid]["port"])})
                     used = {v["port"] for v in st.values()}
                     free = [p for p in PORTS if p not in used]
                     if not free:
@@ -171,7 +175,7 @@ class H(BaseHTTPRequestHandler):
                     _save(st)
                     _log("%s: -> port %d, node %s" % (uid, port, node))
                     return self._send(200, {"uid": uid, "port": port, "node": node,
-                                            "proxy": "http://%s:%d" % (API.split("//")[1].split(":")[0], port),
+                                            "proxy": "http://%s:%d" % (API_HOST, port),
                                             "controller": API})
                 if uid not in st:
                     return self._send(404, {"error": "not registered", "uid": uid}) if u.path != "/delete" else self._send(200, {"deleted": False})

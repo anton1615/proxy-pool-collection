@@ -18,13 +18,11 @@ own worker; otherwise proxy blocks are built locally. Pure standard library.
 from __future__ import annotations
 
 import ipaddress
+from contextlib import closing
 import json
 import os
-import re
 import sqlite3
 import subprocess
-import sys
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -115,18 +113,12 @@ def load_x4():
     return out
 
 
-def in_ranges(ip, ranges):
+def in_ranges(ip, networks):
     try:
         addr = ipaddress.ip_address(ip)
-        for cidr in ranges:
-            try:
-                if addr in ipaddress.ip_network(cidr, strict=False):
-                    return True
-            except ValueError:
-                continue
     except ValueError:
         return False
-    return False
+    return any(addr in net for net in networks)
 
 
 def assess_quality(rows, x4):
@@ -137,12 +129,20 @@ def assess_quality(rows, x4):
         log("ip-api failed (%s); using CIDR-only profile" % exc)
         info = []
     by_ip = {x.get("query"): x for x in info if isinstance(x, dict)}
+    nets = {}
+    for key in ("vpn", "dc"):
+        nets[key] = []
+        for c in x4.get(key, []):
+            try:
+                nets[key].append(ipaddress.ip_network(c, strict=False))
+            except ValueError:
+                continue
     out = {}
     for r in rows:
         ip = r["ip"]
         d = by_ip.get(ip, {})
-        proxy = bool(d.get("proxy")) or in_ranges(ip, x4.get("vpn", []))
-        hosting = bool(d.get("hosting")) or in_ranges(ip, x4.get("dc", []))
+        proxy = bool(d.get("proxy")) or in_ranges(ip, nets["vpn"])
+        hosting = bool(d.get("hosting")) or in_ranges(ip, nets["dc"])
         out[ip] = {"proxy": proxy, "hosting": hosting,
                    "isp": d.get("isp", ""), "ts": int(time.time())}
     return out
@@ -193,7 +193,7 @@ def build_cfg(blocks):
             + "".join(rules) + "  - MATCH,DIRECT\n")
 
 
-def measure(node, port):
+def measure(port):
     """One curl process: warm-up + 3 measured downloads, median body time."""
     proxy = "http://127.0.0.1:%d" % port
     curl = ["curl", "-s", "-o", "/dev/null", "-w", "%{time_total} %{time_starttransfer}",
@@ -235,9 +235,11 @@ def scrub_legacy_scores(conn):
 
 
 def due_nodes(conn, nodes):
+    rows = {ip: (ts, f) for ip, ts, f in
+            conn.execute("SELECT ip, sp_ts, sp_fail FROM quality")}
     out = []
     for n in nodes:
-        row = conn.execute("SELECT sp_ts, sp_fail FROM quality WHERE ip=?", (n["ip"],)).fetchone()
+        row = rows.get(n["ip"])
         if row is None or (time.time() - (row[0] or 0)) >= MIN_AGE_S:
             out.append(n)
     return out[:BATCH]
@@ -249,8 +251,9 @@ def record(conn, ip, mbps, quality):
     fail = (row[1] if row else 0) or 0
     if mbps is None:
         conn.execute("INSERT INTO quality(ip,sp_ts,sp_fail) VALUES(?,?,?) "
-                     "ON CONFLICT(ip) DO UPDATE SET sp_ts=excluded.sp_ts, sp_fail=?",
-                     (ip, time.time(), fail + 1, fail + 1))
+                     "ON CONFLICT(ip) DO UPDATE SET sp_ts=excluded.sp_ts, "
+                     "sp_fail=excluded.sp_fail",
+                     (ip, time.time(), fail + 1))
     else:
         ewma = mbps if prev == 0 else 0.3 * mbps + 0.7 * prev
         conn.execute("INSERT INTO quality(ip,sp_ewma,sp_ts,sp_fail,q) VALUES(?,?,?,0,?) "
@@ -269,8 +272,11 @@ def loadavg_ok():
 
 
 def run_cycle():
-    conn = open_db()
-    scrub_legacy_scores(conn)
+    with closing(open_db()) as conn:
+        return _cycle(conn)
+
+
+def _cycle(conn):
     if not loadavg_ok():
         log("load guard: skipping cycle")
         return
@@ -297,7 +303,7 @@ def run_cycle():
     try:
         time.sleep(2)
         for (name, _b, port), n in zip(blocks, nodes):
-            mbps = measure(n, port)
+            mbps = measure(port)
             record(conn, n["ip"], mbps, quality)
             log("%s %s -> %s Mbps" % (name, n["ip"], mbps))
     finally:
@@ -309,6 +315,9 @@ def run_cycle():
 
 
 def main():
+    conn = open_db()
+    scrub_legacy_scores(conn)
+    conn.close()
     log("start db=%s mihomo=%s batch=%d peer=%s"
         % (DB_PATH, MIHOMO, BATCH, PEER_URL or "(local blocks)"))
     while True:
