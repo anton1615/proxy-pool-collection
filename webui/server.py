@@ -81,15 +81,15 @@ class Handler(BaseHTTPRequestHandler):
         api = cfg["pools"]["vg"]["upstream"].rstrip("/")
         ctrl = os.environ.get("SHARED_MIHOMO_API", "http://127.0.0.1:7910").rstrip("/")
 
-        def get(url):
-            with urllib.request.urlopen(url, timeout=10) as r:
+        def get(url, timeout=5):
+            with urllib.request.urlopen(url, timeout=timeout) as r:
                 return json.loads(r.read() or b"{}")
 
         try:
             status = get(api + "/status")
             nodes = get(api + "/nodes")
             try:
-                prov = get(ctrl + "/providers/proxies/hub")
+                prov = get(ctrl + "/providers/proxies/hub", timeout=2)
                 alive = {p.get("name"): bool(p.get("alive")) for p in prov.get("proxies", [])}
             except Exception:
                 alive = {}
