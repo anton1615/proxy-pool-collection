@@ -1,0 +1,14 @@
+[Unit]
+Description=VPNGate speed/quality daemon (public sources only)
+After=network-online.target vpngate-hub.service
+
+[Service]
+Type=simple
+User=proxy
+EnvironmentFile=/etc/vpngate-hub/speed.env
+ExecStart=/usr/bin/python3 -u /opt/vpngate-speed/vpngate-speed.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
