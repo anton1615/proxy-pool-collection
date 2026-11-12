@@ -1,0 +1,29 @@
+{
+  "_about": "Copy to config.json and edit. upstream is a fixed base URL (scheme+host+port). ui_path carries the pool's dashboard token alias. listen defaults to loopback; binding to a tailnet address is an explicit opt-in.",
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "host_allowlist": ["127.0.0.1", "localhost"],
+  "pools": {
+    "foxy": {
+      "label": "FoxyVPN",
+      "upstream": "http://127.0.0.1:8080",
+      "ui_path": "sesame-foxyvpn-dashboard"
+    },
+    "urn": {
+      "label": "URnetwork",
+      "upstream": "http://127.0.0.1:8090",
+      "ui_path": "urn-dashboard"
+    },
+    "ws": {
+      "label": "Windscribe",
+      "upstream": "http://127.0.0.1:8096",
+      "ui_path": "windscribe-dashboard"
+    },
+    "vg": {
+      "_about": "The VPNGate dashboard is served statically at /p/vg/ by this server; /p/vg/api/* proxies to register.py.",
+      "label": "VPNGate",
+      "upstream": "http://127.0.0.1:8095",
+      "controller": "http://127.0.0.1:7910"
+    }
+  }
+}
