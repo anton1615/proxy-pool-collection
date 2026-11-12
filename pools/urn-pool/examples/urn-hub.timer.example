@@ -1,0 +1,9 @@
+[Unit]
+Description=urn hub every 30 min
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30min
+
+[Install]
+WantedBy=timers.target
