@@ -1,0 +1,10 @@
+{
+  "_about": "Placeholder OpenVPN template. Copy to ovpn-template.json (gitignored) and fill the CA/cert/key blocks from your own authorized VPNGate OpenVPN profile. Never commit real key material.",
+  "cipher": "AES-128-CBC",
+  "auth": "SHA1",
+  "mtu": 1100,
+  "ping": 10,
+  "ca": "REPLACE_WITH_CA_PEM_BLOCK",
+  "cert": "REPLACE_WITH_CLIENT_CERT_PEM_BLOCK",
+  "key": "REPLACE_WITH_CLIENT_KEY_PEM_BLOCK"
+}

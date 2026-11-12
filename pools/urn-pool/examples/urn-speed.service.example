@@ -1,0 +1,14 @@
+[Unit]
+Description=urn speed daemon
+After=network-online.target
+
+[Service]
+Type=simple
+# URNPROXY=/path/to/urnproxy
+# SPEED_DAILY_GB=300
+ExecStart=/usr/bin/python3 %h/urn-pool/urn-speed.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

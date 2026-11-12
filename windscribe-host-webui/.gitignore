@@ -1,0 +1,9 @@
+# The host snapshot resolves BASE to this directory; everything below is
+# runtime-only and must never be committed (credentials live in accounts/).
+state.json
+serverlist.json
+uitoken
+accounts/
+inbox/
+logs/
+conf/

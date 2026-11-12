@@ -1,0 +1,1696 @@
+#!/usr/bin/env python3
+"""windscribe-pool — 一個客戶端一個穩定 port,背後是 Windscribe 免費節點的 OpenVPN 出口。
+
+架構(仿 foxyvpn-pool / urn-pool 的 relay 設計):
+    client ──socks5 / HTTP CONNECT──> <BIND_HOST>:2300x   前層 front(終結交握,之後只搬位元組)
+                          │ flip
+                  <inner>:3300x     socks5 後端(SO_BINDTODEVICE → tunX)
+                          │
+                     tunX (openvpn, 免費節點 IP:443/udp) ──> Windscribe
+
+- 一個 port = 一個節點 + 一批 Windscribe 帳號(batch)。免費帳號額度 2 GiB/月,用完換批內下一顆:
+  先起新隧道暖機 → relay 翻轉 → 舊的等連線排空退休,對外 port 全程不變。
+- 只用免費節點(`serverlist/openvpn/0/0` 過濾 `pro_only`);付費節點永不使用。
+- 一顆帳號同時只能有一條隧道(Windscribe 實測:同帳號第二條會被靜默丟包),所以每顆帳號只配一個節點。
+- 帳號來源:註冊工具(不在本 repo)把帳號 JSON push 進 `inbox/`,池每輪 ingest:
+
+      ssh user@pool-host "cat > ~/windscribe-pool/inbox/<username>.json"
+
+  格式:{"username","password","ovpn_user","ovpn_pass","traffic_max","node_ip","node","datacenter"}
+
+API(無認證,信任網段):
+  GET  /status                     → 節點 + 額度 + 帳號池狀態
+  GET  /register?uid=N&(country=|node=)  → 建節點,回 public port(無 country/node 則隨機挑免費節點)
+  GET  /country?uid=N&country=CC   → 無縫換節點(同國、port 不變)
+  GET  /rotate?uid=N[&country=CC][&key=K] → 不重複隨機挑免費節點並切過去
+  GET  /accounts                   → 帳號池(額度 / 使用中 / bad / exhausted)
+  GET  /accounts/reset?label=L     → 解除 bad / exhausted(手動)
+  GET  /nodes[?country=CC]         → 免費節點清單(付費節點不出現)
+  GET  /sub[?uid=N]                → mihomo 訂閱(socks5 節點)
+  GET  /delete?uid=N               → 刪節點
+"""
+import json
+import os
+import random
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+STATE_PATH = os.path.join(BASE, "state.json")
+INBOX = os.path.join(BASE, "inbox")
+ACCDIR = os.path.join(BASE, "accounts")
+SERVERLIST = os.path.join(BASE, "serverlist.json")
+TEMPLATE = os.path.join(BASE, "template.udp")
+LOGDIR = os.path.join(BASE, "logs")
+CONFDIR = os.path.join(BASE, "conf")
+
+FRONT_BASE = int(os.environ.get("FRONT_BASE", 23000))
+INNER_BASE = int(os.environ.get("INNER_BASE", 33000))
+API_PORT = int(os.environ.get("API_PORT", 8094))
+
+
+def _ui_token():
+    """UI_TOKEN 優先;沒有就讀 BASE/uitoken — 外部重啟腳本抓不到 env 時仍能開 UI。"""
+    if os.environ.get("UI_TOKEN"):
+        return os.environ["UI_TOKEN"]
+    try:
+        with open(os.path.join(BASE, "uitoken")) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+UI_TOKEN = _ui_token()      # 空字串 = 不開 web UI
+
+
+def default_bind_host():
+    """比照家族專案:預設綁本機 Tailscale 位址;抓不到退回 loopback。"""
+    try:
+        out = subprocess.run(["ip", "-4", "addr", "show", "tailscale0"],
+                             capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                return line.split()[1].split("/")[0]
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+BIND_HOST = os.environ.get("BIND_HOST") or default_bind_host()
+PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "")
+API = "https://api.windscribe.com"
+WS_PORT = int(os.environ.get("WS_PORT", 443))
+WS_PROTO = os.environ.get("WS_PROTO", "udp")
+
+ACCOUNTS_PER_NODE = int(os.environ.get("ACCOUNTS_PER_NODE", 3))  # 每個 port 先配幾顆帳號(一批)
+POLL = int(os.environ.get("POLL", 120))                          # 監督/額度檢查週期(秒)
+QUOTA_SOFT = float(os.environ.get("QUOTA_SOFT", 0.92))           # 本地計量到此比例就換帳號
+QUOTA_PROBE_AT = float(os.environ.get("QUOTA_PROBE_AT", 0.75))   # 超過此比例才向 API 對帳
+PROBE_GAP = int(os.environ.get("PROBE_GAP", 600))                # 同一顆帳號兩次對帳最短間隔(秒)
+KILL_RESP_GRACE = float(os.environ.get("KILL_RESP_GRACE", 15))   # rotate 後,上游已回完的閒置連線>此秒數就斬
+KILL_REQ_GRACE = float(os.environ.get("KILL_REQ_GRACE", 30))     # 請求已送、等 TTFB 的連線保留至少此秒數
+
+LOCK = threading.RLock()
+STATE = {"nodes": {}, "next_slot": 0, "accts": {}, "rotate": {}}
+OVPN = shutil.which("openvpn") or "/usr/sbin/openvpn"
+
+
+def log(msg):
+    print(f"[pool] {msg}", flush=True)
+
+
+# ---------------- 狀態 ----------------
+def load_state():
+    global STATE
+    if os.path.exists(STATE_PATH):
+        try:
+            STATE = json.load(open(STATE_PATH))
+        except Exception:
+            pass
+    for k, v in (("nodes", {}), ("accts", {}), ("rotate", {})):
+        STATE.setdefault(k, {})
+    STATE.setdefault("next_slot", 0)
+
+
+def save_state():
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(STATE, fh, indent=1)
+    os.replace(tmp, STATE_PATH)
+
+
+def alloc_slot():
+    with LOCK:
+        idx = STATE["next_slot"]
+        STATE["next_slot"] = idx + 1
+        save_state()
+        return idx
+
+
+def tun_name(slot):
+    return f"tun{200 + slot}"
+
+
+def month_key():
+    return time.strftime("%Y-%m", time.gmtime())
+
+
+# ---------------- 帳號池 ----------------
+def ingest_inbox():
+    """把 inbox/*.json 收進 accounts/,回傳新收幾顆。"""
+    os.makedirs(INBOX, exist_ok=True)
+    os.makedirs(ACCDIR, exist_ok=True)
+    n = 0
+    for name in sorted(os.listdir(INBOX)):
+        if not name.endswith(".json"):
+            continue
+        src, dst = os.path.join(INBOX, name), os.path.join(ACCDIR, name)
+        try:
+            with open(src) as fh:
+                d = json.load(fh)
+            if not (d.get("username") and d.get("ovpn_user") and d.get("ovpn_pass")):
+                raise ValueError("missing username/ovpn_user/ovpn_pass")
+            os.replace(src, dst)
+            os.chmod(dst, 0o600)
+            n += 1
+        except Exception as exc:
+            log(f"inbox {name} rejected: {exc}")
+            bad = src + ".bad"
+            try:
+                os.replace(src, bad)
+            except Exception:
+                pass
+    return n
+
+
+def load_accounts():
+    out = []
+    if not os.path.isdir(ACCDIR):
+        return out
+    for name in sorted(os.listdir(ACCDIR)):
+        if not name.endswith(".json"):
+            continue
+        try:
+            d = json.load(open(os.path.join(ACCDIR, name)))
+        except Exception as exc:
+            log(f"accounts/{name} unreadable: {exc}")
+            continue
+        if not (d.get("username") and d.get("ovpn_user") and d.get("ovpn_pass")):
+            continue
+        out.append(d)
+    return out
+
+
+def label_of(acct):
+    return acct["username"]
+
+
+def acct_state(label):
+    with LOCK:
+        st = STATE["accts"].setdefault(label, {})
+        st.setdefault("used_bytes", 0)
+        st.setdefault("month", month_key())
+        st.setdefault("bad", False)
+        st.setdefault("exhausted", False)
+        st.setdefault("reported", None)
+        st.setdefault("probed_at", 0)
+        return st
+
+
+def roll_month():
+    """Windscribe 免費額度按月給;跨月就把本地計量歸零(exhausted 也一起解)。"""
+    cur = month_key()
+    dirty = False
+    with LOCK:
+        for label, st in STATE["accts"].items():
+            if st.get("month") != cur:
+                st["month"] = cur
+                st["used_bytes"] = 0
+                st["reported"] = None
+                st["exhausted"] = False
+                dirty = True
+        if dirty:
+            save_state()
+
+
+def live_slots():
+    """(label, dev) 目前還掛著的 slot(含已退休但欄位未清的,以 STATE 為準)。"""
+    out = []
+    for node in STATE["nodes"].values():
+        for s in (node.get("slots") or {}).values():
+            if s.get("cred") and s.get("dev"):
+                out.append((s["cred"], s["dev"]))
+    return out
+
+
+def in_use_labels():
+    """目前真的有一條活隧道在跑的帳號(死掉的隧道不算,帳號立刻可被下一個節點接手)。
+
+    draining 中(已翻 target、等排空)的舊隧道也算在內:openvpn 還掛著、
+    帳號額度還在燒,不該讓別的節點同時抓同一顆帳號。
+    """
+    counts = {}
+    for uid, n in NODES.items():
+        tun = n.get("cur")
+        if tun and tun.up:
+            counts[tun.label] = counts.get(tun.label, 0) + 1
+        for old in n.get("draining", []):
+            if old.up:
+                counts[old.label] = counts.get(old.label, 0) + 1
+    return counts
+
+
+def dev_bytes(dev):
+    try:
+        p = subprocess.run(["ip", "-s", "link", "show", "dev", dev],
+                           capture_output=True, text=True, timeout=5)
+        rx = tx = 0
+        for line in p.stdout.splitlines():
+            f = line.split()
+            if len(f) >= 4 and f[0].isdigit():
+                rx, tx = int(f[0]), int(f[2])
+        return rx, tx
+    except Exception:
+        return 0, 0
+
+
+def acct_used(label):
+    st = acct_state(label)
+    total = int(st.get("used_bytes") or 0)
+    for lab, dev in live_slots():
+        if lab == label:
+            rx, tx = dev_bytes(dev)
+            total += rx + tx
+    return total
+
+
+def acct_limit(acct):
+    st = acct_state(label_of(acct))
+    rep = st.get("reported") or {}
+    return int(rep.get("max") or acct.get("traffic_max") or 2 * 1024**3)
+
+
+def acct_available(label):
+    st = acct_state(label)
+    return not st.get("bad") and not st.get("exhausted")
+
+
+def other_batch_labels(uid=""):
+    """其他節點的 batch 成員(挑帳號時優先避開,免得所有節點搶同一批)。"""
+    out = set()
+    for u, meta in STATE["nodes"].items():
+        if u == uid:
+            continue
+        out |= {l for l in (meta.get("batch") or []) if l}
+    return out
+
+
+def pick_account(exclude=()):
+    """挑一顆可用、且目前沒有任何節點正在用的帳號。"""
+    with LOCK:
+        used = in_use_labels()
+        for a in load_accounts():
+            lab = label_of(a)
+            if lab in exclude or used.get(lab, 0):
+                continue
+            if not acct_available(lab):
+                continue
+            return a
+    return None
+
+
+def mark_account(label, bad=None, exhausted=None, error=""):
+    with LOCK:
+        st = acct_state(label)
+        if bad is not None:
+            st["bad"] = bool(bad)
+            if bad:
+                st["fails"] = int(st.get("fails") or 0) + 1
+            else:
+                st["fails"] = 0
+        if exhausted is not None:
+            st["exhausted"] = bool(exhausted)
+        if error:
+            st["last_error"] = error[:200]
+        st["updated_at"] = time.time()
+        save_state()
+
+
+def settle_slot(meta, slot_key):
+    """slot 退休:把 tun 介面累計位元組記到該帳號的用量,再清掉 slot。"""
+    s = (meta.get("slots") or {}).pop(str(slot_key), None)
+    if not s:
+        return
+    lab = s.get("cred")
+    if lab and s.get("dev"):
+        rx, tx = dev_bytes(s["dev"])
+        with LOCK:
+            st = acct_state(lab)
+            st["used_bytes"] = int(st.get("used_bytes") or 0) + rx + tx
+            save_state()
+
+
+def probe_quota(acct):
+    """向 Windscribe 對帳(只在使用量接近上限時呼叫)。429/707 就跳過,等下一輪。"""
+    lab = label_of(acct)
+    st = acct_state(lab)
+    if time.time() - float(st.get("probed_at") or 0) < PROBE_GAP:
+        return
+    with LOCK:
+        st["probed_at"] = time.time()
+        save_state()
+    body = json.dumps({"username": lab, "password": acct.get("password"),
+                       "platform": "legacy-web", "session_type_id": 1}).encode()
+    req = urllib.request.Request(API + "/Session", data=body, method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Origin": "https://windscribe.com",
+                                          "Referer": "https://windscribe.com/",
+                                          "authorization": "Bearer anonymous"})
+    try:
+        d = json.load(urllib.request.urlopen(req, timeout=30))["data"]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            log(f"quota probe {lab}: rate limited, skip")
+        else:
+            log(f"quota probe {lab}: HTTP {exc.code}")
+        return
+    except Exception as exc:
+        log(f"quota probe {lab}: {exc}")
+        return
+    used, mx = int(d.get("traffic_used") or 0), int(d.get("traffic_max") or 0)
+    with LOCK:
+        st = acct_state(lab)
+        st["reported"] = {"used": used, "max": mx, "at": time.time(),
+                          "reset": d.get("last_reset"), "status": d.get("status")}
+        if mx and used >= mx:
+            st["exhausted"] = True
+            log(f"quota probe {lab}: API says exhausted ({used}/{mx})")
+        save_state()
+    return st.get("reported")
+
+
+# ---------------- 免費節點 ----------------
+def free_nodes(refresh=False):
+    """只在 serverlist 裡的免費節點(pro_only 全排除)。"""
+    if refresh or not os.path.exists(SERVERLIST):
+        try:
+            req = urllib.request.Request(
+                "https://assets.windscribe.com/serverlist/openvpn/0/0",
+                headers={"User-Agent": "curl/8"})
+            data = urllib.request.urlopen(req, timeout=40).read()
+            tmp = SERVERLIST + ".tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, SERVERLIST)
+        except Exception as exc:
+            log(f"serverlist refresh failed: {exc}")
+    d = json.load(open(SERVERLIST))
+    out = []
+    for region in d.get("data", []):
+        for n in region.get("nodes", []):
+            if n.get("pro_only") or not n.get("ip"):
+                continue
+            out.append({"country": region.get("short_name", ""),
+                        "hostname": n.get("hostname", ""), "ip": n["ip"]})
+    return out
+
+
+def node_country(node):
+    return (node.get("country") or "").split("-")[0].upper()
+
+
+def pick_node(country=None):
+    pool = free_nodes()
+    if country:
+        cc = country.upper()
+        hits = [n for n in pool if node_country(n) == cc]
+        if not hits:
+            return None
+        return random.choice(hits)
+    return random.choice(pool) if pool else None
+
+
+def rotate_node(country=None, key=None):
+    """不重複隨機:一輪洗牌用完才重洗。"""
+    pool = free_nodes()
+    if country:
+        cc = country.upper()
+        pool = [n for n in pool if node_country(n) == cc]
+    if not pool:
+        return None
+    ips = [n["ip"] for n in pool]
+    with LOCK:
+        rot = STATE.setdefault("rotate", {})
+        k = key or (country.upper() if country else "ALL")
+        st = rot.get(k) or {}
+        order, pos = st.get("order") or [], int(st.get("pos") or 0)
+        if not order or set(order) != set(ips) or pos >= len(order):
+            order = random.sample(ips, len(ips))
+            pos = 0
+            log(f"rotate {k}: new shuffle over {len(order)} free nodes")
+        ip = order[pos]
+        rot[k] = {"order": order, "pos": pos + 1, "size": len(order), "updated_at": time.time()}
+        save_state()
+    return next((n for n in pool if n["ip"] == ip), None)
+
+
+# ---------------- SOCKS5 後端(綁 tun 裝置) ----------------
+def handle_socks_client(client, dev):
+    upstream = None
+    try:
+        head = client.recv(2)
+        if len(head) < 2 or head[0] != 5:
+            return
+        client.recv(head[1])
+        client.sendall(b"\x05\x00")
+        req = client.recv(4)
+        if len(req) < 4 or req[1] != 1:
+            client.sendall(b"\x05\x07\x00\x01" + b"\x00" * 6)
+            return
+        atyp = req[3]
+        if atyp == 1:
+            host = socket.inet_ntoa(client.recv(4))
+        elif atyp == 3:
+            host = client.recv(client.recv(1)[0]).decode()
+        else:
+            host = socket.inet_ntop(socket.AF_INET6, client.recv(16))
+        port = struct.unpack("!H", client.recv(2))[0]
+
+        upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        upstream.settimeout(25)
+        upstream.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode() + b"\0")
+        upstream.connect((host, port))
+        upstream.settimeout(None)
+        client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0))
+
+        def pump(a, b):
+            try:
+                while True:
+                    data = a.recv(65536)
+                    if not data:
+                        break
+                    b.sendall(data)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=pump, args=(upstream, client), daemon=True)
+        t.start()
+        pump(client, upstream)
+        t.join(timeout=1)
+    except Exception:
+        pass
+    finally:
+        for s in (client, upstream):
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def start_socks(port, dev, stop_flag):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(64)
+    srv.settimeout(1.0)
+
+    def loop():
+        while not stop_flag.is_set():
+            try:
+                c, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=handle_socks_client, args=(c, dev), daemon=True).start()
+        try:
+            srv.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
+
+# ---------------- 前層 byte relay ----------------
+def _socks5_dial(u, host, port):
+    try:
+        u.settimeout(25)
+        u.sendall(b"\x05\x01\x00")
+        r = u.recv(2)
+        if len(r) < 2 or r[0] != 5:
+            return False
+        hb = host.encode()
+        if len(hb) > 255:
+            return False
+        u.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack("!H", port))
+        r2 = u.recv(10)
+        return len(r2) >= 2 and r2[1] == 0
+    except Exception:
+        return False
+
+
+class Relay:
+    def __init__(self, port):
+        self.port = port
+        self.target = None
+        self.active = 0
+        self.active_by_port = {}   # inner_port -> 這條隧道目前背著的連線數
+        self.conns = {}
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind((BIND_HOST, port))
+        self.srv.listen(128)
+        self.srv.settimeout(1.0)
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while not self.stop.is_set():
+            try:
+                c, _ = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            target = self.target
+            if not target:
+                c.close()
+                continue
+            try:
+                u = socket.create_connection(("127.0.0.1", target), timeout=10)
+            except Exception:
+                c.close()
+                continue
+            threading.Thread(target=self._serve, args=(c, u, target), daemon=True).start()
+
+    def _serve(self, c, u, target):
+        # 計數與登記都在交握之前:交握中的連線也必須被 drain 看見,
+        # 否則 rotate 會在它還沒交握完時就停掉隧道。
+        with self.lock:
+            self.conns[id(c)] = {"socks": (c, u), "port": target,
+                                 "last_up": time.time(), "last_down": time.time()}
+            self.active += 1
+            self.active_by_port[target] = self.active_by_port.get(target, 0) + 1
+        if not self._http_connect_bridge(c, u):
+            self._drop_conn(c, target, id(c))
+            return
+        self._pipe(c, u, target, id(c))
+
+    def _drop_conn(self, c, target_port, conn_id):
+        with self.lock:
+            self.conns.pop(conn_id, None)
+            self.active = max(0, self.active - 1)
+            self.active_by_port[target_port] = max(0, self.active_by_port.get(target_port, 0) - 1)
+
+    @staticmethod
+    def _http_connect_bridge(c, u):
+        def drop():
+            for s in (c, u):
+                try: s.close()
+                except Exception: pass
+            return False
+        deadline = time.time() + 60      # 交握的總期限,不只 per-recv
+        try:
+            c.settimeout(60)
+            head = c.recv(1)
+        except Exception:
+            return drop()
+        if not head:
+            return drop()
+        if head == b"\x05":
+            try:
+                nm = ord(c.recv(1))
+                c.recv(nm)
+                c.sendall(b"\x05\x00")
+                req = c.recv(4)
+                if len(req) < 4 or req[1] != 1:
+                    raise ValueError("connect only")
+                atyp = req[3]
+                if atyp == 1:
+                    host = socket.inet_ntoa(c.recv(4))
+                elif atyp == 3:
+                    host = c.recv(c.recv(1)[0]).decode("utf-8", "replace")
+                else:
+                    host = socket.inet_ntop(socket.AF_INET6, c.recv(16))
+                port = struct.unpack("!H", c.recv(2))[0]
+                if not _socks5_dial(u, host, port):
+                    c.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)   # REP=0x05 connection refused
+                    raise ValueError("inner refused")
+                c.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0))
+            except Exception:
+                return drop()
+        elif head in (b"C", b"c"):
+            try:
+                line = head + c.recv(4096)
+                while b"\r\n\r\n" not in line:
+                    if len(line) > 32768:
+                        raise ValueError("headers too large")
+                    if time.time() > deadline:
+                        raise ValueError("handshake timeout")
+                    more = c.recv(4096)
+                    if not more:
+                        raise ValueError("truncated")
+                    line += more
+                req_line = line.split(b"\r\n", 1)[0].decode("latin1")
+                parts = req_line.split()
+                if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                    raise ValueError("not CONNECT")
+                hp = parts[1]
+                host, _, port_s = hp.rpartition(":")
+                host = host.strip("[]")     # CONNECT [::1]:443
+                if not _socks5_dial(u, host, int(port_s)):
+                    raise ValueError("inner refused")
+                c.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                left = line.split(b"\r\n\r\n", 1)[1]
+                if left:
+                    u.sendall(left)
+            except Exception:
+                try:
+                    c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                except Exception:
+                    pass
+                return drop()
+        else:
+            try:
+                c.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except Exception:
+                pass
+            return drop()
+        try:
+            c.settimeout(None)
+            u.settimeout(None)
+        except Exception:
+            pass
+        return True
+
+
+    def _pipe(self, a, b, target_port, conn_id):
+        def one(x, y, upstream):
+            try:
+                while True:
+                    d = x.recv(65536)
+                    if not d:
+                        break
+                    # 在 sendall 之前打戳:對方讀得慢時 sendall 會阻塞,
+                    # 那時連線是活的不該被當成閒置。
+                    with self.lock:
+                        e = self.conns.get(conn_id)
+                        if e is not None:
+                            e["last_up" if upstream else "last_down"] = time.time()
+                    y.sendall(d)
+            except Exception:
+                pass
+            try:
+                y.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=one, args=(b, a, True), daemon=True)
+        t.start()
+        one(a, b, False)
+        t.join(timeout=1)
+        for s in (a, b):
+            try:
+                s.close()
+            except Exception:
+                pass
+        self._drop_conn(a, target_port, conn_id)
+
+    def kill_idle(self, target_port, grace_req, grace_resp):
+        """關掉背在 target_port 隧道上、閒置超過寬限的連線(rotate 後斬 keep-alive)。
+
+        兩個方向分別計時:
+          last_up   上游→客戶端最後一次位元組(回應/串流的 token)
+          last_down 客戶端→上游最後一次位元組(請求)
+        閒置池連線:兩個方向都靜默很久 → 用 grace_resp 快速斬,讓下一個
+        請求重新 dial 走新 IP。
+        活串流:上游每幾秒就吐 token(實測最大間隔 6s),last_up 一直刷新 →
+        永遠不會被斬。
+        慢 TTFB:請求已送但上游還沒吐第一個 byte,last_up 很舊但 last_down
+        很新 → 用 grace_req 保護。
+        """
+        now = time.time()
+        with self.lock:
+            items = list(self.conns.items())
+        for conn_id, e in items:
+            if e["port"] != target_port:
+                continue
+            req_idle = now - e["last_down"]
+            resp_idle = now - e["last_up"]
+            if req_idle < grace_req:
+                continue
+            if resp_idle < grace_resp:
+                continue
+            for s in e["socks"]:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)   # close() 叫不醒別的執行緒裡的 recv
+                except Exception:
+                    pass
+
+    def close(self):
+        self.stop.set()
+        try:
+            self.srv.close()
+        except Exception:
+            pass
+
+
+# ---------------- OpenVPN 後端 ----------------
+def write_ovpn(slot, node_ip):
+    """伺服器回的基礎檔(CA / tls-auth,無 remote)+ 免費節點 IP。"""
+    os.makedirs(CONFDIR, exist_ok=True)
+    path = os.path.join(CONFDIR, f"slot{slot}.ovpn")
+    body = open(TEMPLATE).read().rstrip("\n")
+    body += (f"\nremote {node_ip}\nport {WS_PORT}\nproto {WS_PROTO}\n"
+             "tun-mtu 1400\nmssfix 1300\nresolv-retry infinite\n")
+    with open(path, "w") as fh:
+        fh.write(body)
+    os.chmod(path, 0o600)
+    return path
+
+
+class Tunnel:
+    def __init__(self, slot, node_ip, acct):
+        self.slot = slot
+        self.node_ip = node_ip
+        self.acct = acct
+        self.label = label_of(acct)
+        self.dev = tun_name(slot)
+        self.inner_port = INNER_BASE + slot
+        self.proc = None
+        self.stop_flag = threading.Event()
+        self.socks = None
+        self.up = False
+        self.error = None
+        os.makedirs(LOGDIR, exist_ok=True)
+        self.log_path = os.path.join(LOGDIR, f"slot{slot}.log")
+
+    def start(self, timeout=50):
+        conf = write_ovpn(self.slot, self.node_ip)
+        auth = os.path.join(CONFDIR, f"slot{self.slot}.auth")
+        with open(auth, "w") as fh:
+            fh.write(f"{self.acct['ovpn_user']}\n{self.acct['ovpn_pass']}\n")
+        os.chmod(auth, 0o600)
+        cmd = [OVPN, "--config", conf, "--dev", self.dev, "--dev-type", "tun",
+               "--auth-user-pass", auth, "--route-nopull",
+               "--pull-filter", "ignore", "route",
+               "--pull-filter", "ignore", "route-ipv6",
+               "--pull-filter", "ignore", "dhcp-option",
+               "--pull-filter", "ignore", "redirect-gateway",
+               "--script-security", "0", "--nobind", "--verb", "3",
+               "--log", self.log_path,
+               "--connect-timeout", "15", "--connect-retry-max", "2"]
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self.error = f"openvpn spawn failed: {exc}"
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(1)
+            txt = open(self.log_path, errors="ignore").read() if os.path.exists(self.log_path) else ""
+            if "Initialization Sequence Completed" in txt:
+                self.up = True
+                break
+            if "AUTH_FAILED" in txt:
+                self.error = "AUTH_FAILED"
+                break
+            if self.proc.poll() is not None:
+                time.sleep(0.5)
+                txt = open(self.log_path, errors="ignore").read() if os.path.exists(self.log_path) else ""
+                if "AUTH_FAILED" in txt:
+                    self.error = "AUTH_FAILED"
+                elif "Initialization Sequence Completed" in txt:
+                    self.up = True
+                else:
+                    self.error = "tunnel failed"
+                break
+        if not self.up:
+            self.stop()
+            return False
+        self.socks = start_socks(self.inner_port, self.dev, self.stop_flag)
+        return True
+
+    def alive(self):
+        return bool(self.up and self.proc and self.proc.poll() is None)
+
+    def stop(self):
+        self.stop_flag.set()
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=8)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.up = False
+
+
+# ---------------- 節點 ----------------
+NODES = {}   # uid -> {"relay": Relay, "cur": Tunnel}
+
+
+def node_public_port(slot):
+    return FRONT_BASE + slot
+
+
+def node_meta(uid):
+    return STATE["nodes"].get(uid)
+
+
+def node_json(uid):
+    meta = node_meta(uid) or {}
+    n = NODES.get(uid)
+    return {"uid": uid, "public_port": meta.get("public_port"),
+            "socks": f"socks5://{PUBLIC_HOST}:{meta.get('public_port')}",
+            "http": f"http://{PUBLIC_HOST}:{meta.get('public_port')}",
+            "country": meta.get("country"), "node": meta.get("node"),
+            "node_ip": meta.get("node_ip"), "cred": meta.get("cred"),
+            "batch": meta.get("batch") or [],
+            "quota": quota_view(meta), "created_at": meta.get("created_at"),
+            "up": bool(n and n["cur"].alive()),
+            "active": n["relay"].active if n else 0}
+
+
+def quota_view(meta):
+    if not meta or not meta.get("cred"):
+        return None
+    label = meta["cred"]
+    acct = next((a for a in load_accounts() if label_of(a) == label), None)
+    if not acct:
+        return None
+    st = acct_state(label)
+    used, limit = acct_used(label), acct_limit(acct)
+    return {"label": label, "used_bytes": used, "limit_bytes": limit,
+            "pct": round(used / limit * 100, 1) if limit else None,
+            "exhausted": bool(st.get("exhausted")), "bad": bool(st.get("bad")),
+            "reported": st.get("reported")}
+
+
+def start_tunnel(slot, node_ip, acct):
+    tun = Tunnel(slot, node_ip, acct)
+    return tun if tun.start() else tun
+
+
+def provision(uid, meta, node, batch, slot=None):
+    """起一條隧道並讓 relay 指向它(relay 已存在就只翻轉)。"""
+    tried = set()
+    used_now = in_use_labels()
+    for label in list(batch):
+        acct = next((a for a in load_accounts() if label_of(a) == label), None)
+        if not acct:
+            batch.remove(label)
+            continue
+        if used_now.get(label):            # 這顆帳號已經有別的活隧道 → 一帳一隧道,跳過
+            continue
+        tried.add(label)
+        tun = start_tunnel(slot, node["ip"], acct)
+        if tun.up:
+            rel = NODES[uid]["relay"] if uid in NODES else None
+            if rel is None:
+                rel = Relay(node_public_port(meta["primary_slot"]))
+                NODES[uid] = {"relay": rel, "cur": tun}
+            old = NODES[uid]["cur"]
+            rel.target = tun.inner_port
+            NODES[uid]["cur"] = tun
+            old_slot = old.slot if old is not tun else None
+            meta["slots"][str(slot)] = {"slot": slot, "cred": tun.label, "dev": tun.dev,
+                                        "inner_port": tun.inner_port, "node_ip": node["ip"]}
+            meta["cred"], meta["node_ip"] = tun.label, node["ip"]
+            meta["node"], meta["country"] = node["hostname"], node["country"]
+            save_state()
+            if old_slot is not None and old_slot != slot:
+                NODES[uid].setdefault("draining", []).append(old)
+                retire_tunnel(uid, old, old_slot)
+            return meta, None
+        err = tun.error or "tunnel failed"
+        if err == "AUTH_FAILED":
+            mark_account(tun.label, bad=True, error="AUTH_FAILED")
+            log(f"account {tun.label} AUTH_FAILED → bad, try next")
+            batch.remove(tun.label)
+            continue
+        return None, err
+    meta["cred"] = ""
+    meta["slots"] = {}
+    save_state()
+    return meta, "no usable account in batch"
+
+
+def retire_tunnel(uid, tun, slot):
+    """舊隧道等「它自己背的連線」排空後退休,並結算該 slot 的流量。
+
+    呼叫時 relay.target 已翻到新隧道,所以只能看 per-tunnel 計數
+    (active_by_port),不能用 rel.target 比較。上限 300s 防 hang 死
+    的 keep-alive 連線把舊隧道永久釘住;連線歸零就當秒退休。
+
+    drain 期間每秒叫 kill_idle:靜默超過寬限的連線直接斬,讓「下一個
+    請求必走新 IP」成立,而不是被 pooled keep-alive 釘在舊 IP 上。
+    正在跑流量的連線 last_up/last_down 一直刷新,不受影響。
+    """
+    def run():
+        meta = node_meta(uid)
+        rel = NODES.get(uid, {}).get("relay")
+        deadline = time.time() + 300
+        hard_deadline = deadline + 300   # 最多再多給 300s 給還在動的串流
+        last_kill = 0.0
+        while rel:
+            if rel.active_by_port.get(tun.inner_port, 0) == 0:
+                break
+            now = time.time()
+            if now - last_kill >= 1.0:
+                rel.kill_idle(tun.inner_port, KILL_REQ_GRACE, KILL_RESP_GRACE)
+                last_kill = now
+            if now >= hard_deadline:
+                break
+            if now >= deadline:
+                # 還有連線在動就延長一輪,而不是硬殺:活串流被斬掉等於回到
+                # 「rotate 會中斷回覆」的老問題。
+                deadline = now + 300
+            time.sleep(0.5)
+        tun.stop()
+        if meta:
+            settle_slot(meta, slot)
+        try:
+            NODES.get(uid, {}).get("draining", []).remove(tun)
+        except ValueError:
+            pass
+        log(f"{uid}: slot{slot} retired ({tun.label})")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def refill_batch(meta, n):
+    """補這個節點的帳號批:先挑別的節點沒配到的,不夠才共用(共用只影響挑選順序,
+    真正上場時由 in_use 保證一顆帳號同時只有一條隧道)。"""
+    have = set(meta.get("batch") or [])
+    others = other_batch_labels(meta.get("uid", ""))
+    used = in_use_labels()
+    cands = [a for a in load_accounts()
+             if label_of(a) not in have and acct_available(label_of(a))]
+    cands.sort(key=lambda a: (label_of(a) in used, label_of(a) in others))
+    for a in cands:
+        have.add(label_of(a))
+        if len(have) >= n:      # 批滿了仍要收到一顆空閒的,否則 provision 整批跳過 → no usable account
+            if any(l not in used for l in have) or not any(label_of(x) not in used for x in cands):
+                break
+    meta["batch"] = list(have)
+    return meta["batch"]
+
+
+def rotate_account(uid, reason=""):
+    """額度用完 / 帳號壞掉:同一個 port、同一個節點,換批內下一顆帳號。"""
+    meta = node_meta(uid)
+    if not meta:
+        return None, "no such node"
+    bad = meta.get("cred")
+    used_now = in_use_labels()
+    batch = [l for l in (meta.get("batch") or [])
+             if l != bad and acct_available(l) and not used_now.get(l)]
+    if not batch:
+        refill_batch(meta, max(ACCOUNTS_PER_NODE, len(meta.get("batch") or []) + 1))
+        batch = [l for l in (meta.get("batch") or [])
+                 if l != bad and acct_available(l) and not used_now.get(l)]
+        if not batch:                     # 批內全在用/全壞 → 直接從全池找一顆空的
+            a = pick_account(exclude={bad})
+            if a:
+                batch = [label_of(a)]
+                meta.setdefault("batch", []).append(label_of(a))
+        if not batch:
+            meta["cred"] = ""
+            save_state()
+            return meta, "account pool exhausted"
+    node = {"ip": meta["node_ip"], "hostname": meta.get("node"), "country": meta.get("country")}
+    slot = alloc_slot()
+    meta, err = provision(uid, meta, node, batch, slot=slot)
+    if err:
+        return None, err
+    log(f"{uid}: account rotated → {meta['cred']} ({reason})")
+    return meta, None
+
+
+def switch_node(uid, node):
+    """無縫換節點:新 slot 暖機 → relay 翻轉 → 舊的排空退休。"""
+    meta = node_meta(uid)
+    if not meta:
+        return None, "no such node"
+    if not meta.get("cred") or not acct_available(meta["cred"]):
+        return rotate_account(uid, "cred unavailable" if meta.get("cred") else "no cred")
+    slot = alloc_slot()
+    # shortcut: 舊隧道正佔用 cred → provision 跳過它,須補 idle 帳號才能換節點
+    batch = [meta["cred"]] + sorted({l for l in (meta.get("batch") or []) if l and l != meta["cred"]})
+    return provision(uid, meta, node, batch, slot=slot)
+
+
+def ensure_node(uid, node=None):
+    with LOCK:
+        meta = STATE["nodes"].get(uid)
+        if meta and not meta.get("_restore"):
+            if uid in NODES:
+                return meta, None
+        if meta and meta.get("_restore"):
+            meta.pop("_restore", None)
+            node = node or {"ip": meta.get("node_ip"), "hostname": meta.get("node"),
+                            "country": meta.get("country")}
+        if node is None:
+            return None, "no free node available"
+        if not meta:
+            slot = alloc_slot()
+            meta = {"uid": uid, "primary_slot": slot, "public_port": node_public_port(slot),
+                    "slots": {}, "created_at": time.time()}
+            STATE["nodes"][uid] = meta
+            save_state()
+        else:
+            STATE["nodes"][uid] = meta
+            slot = meta["primary_slot"]
+        batch = refill_batch(meta, ACCOUNTS_PER_NODE)
+        batch = [l for l in batch if acct_available(l)]
+        if not batch:
+            return None, "account pool empty (wait for register to push accounts)"
+        meta, err = provision(uid, meta, node, batch, slot=slot)
+        if err:
+            STATE["nodes"].pop(uid, None)
+            save_state()
+            return None, err
+        save_state()
+        return meta, None
+
+
+def delete_node(uid):
+    meta = STATE["nodes"].pop(uid, None)
+    n = NODES.pop(uid, None)
+    if n:
+        n["relay"].close()
+        n["cur"].stop()
+    if meta:
+        for key in list((meta.get("slots") or {}).keys()):
+            settle_slot(meta, key)
+    save_state()
+    return bool(n or meta)
+
+
+# ---------------- 監督 / 額度 ----------------
+def supervise():
+    while True:
+        time.sleep(POLL)
+        try:
+            roll_month()
+            if ingest_inbox():
+                log("inbox ingested")
+            for uid, meta in list(STATE["nodes"].items()):
+                n = NODES.get(uid)
+                if not n or not n["cur"].alive():
+                    node = {"ip": meta["node_ip"], "hostname": meta.get("node"),
+                            "country": meta.get("country")}
+                    slot = alloc_slot()
+                    meta, err = provision(uid, meta, node, [meta["cred"]] if meta.get("cred") else [], slot=slot)
+                    if err:
+                        log(f"{uid}: reprovision failed ({err}) → rotating account")
+                        meta, err2 = rotate_account(uid, "tunnel dead")
+                        if err2:
+                            log(f"{uid}: rotate failed ({err2})")
+                    else:
+                        log(f"{uid}: tunnel re-provisioned")
+                    continue
+                label = meta.get("cred")
+                acct = next((a for a in load_accounts() if label_of(a) == label), None)
+                if not acct:
+                    continue
+                used, limit = acct_used(label), acct_limit(acct)
+                if limit and used >= limit * QUOTA_PROBE_AT:
+                    rep = probe_quota(acct)
+                    if rep and rep.get("max") and rep["used"] >= rep["max"] * QUOTA_SOFT:
+                        meta, err = rotate_account(uid, f"api quota {rep['used']}/{rep['max']}")
+                        if err:
+                            log(f"{uid}: rotate failed ({err})")
+                        continue
+                    if rep and rep.get("max"):
+                        used, limit = rep["used"], rep["max"]
+                if limit and used >= limit * QUOTA_SOFT:
+                    meta, err = rotate_account(uid, f"quota {used}/{limit}")
+                    if err:
+                        log(f"{uid}: rotate failed ({err})")
+        except Exception as exc:  # noqa: BLE001 — 一輪失敗不該停整個監督
+            log(f"supervise cycle failed: {exc}")
+
+
+# ---------------- HTTP API ----------------
+# ── web UI ─────────────────────────────────────────────────────────────────
+#
+# UI_TOKEN 有值時掛在 /<UI_TOKEN>/:頁面只用相對路徑呼叫同源 API,uid 一律走
+# textContent 進 DOM,絕不進 innerHTML。
+def country_names():
+    """cc → 顯示名。同國多 region 取共同字首詞(US Central/US East → US)。"""
+    names = {}
+    if os.path.exists(SERVERLIST):
+        for region in json.load(open(SERVERLIST)).get("data") or []:
+            nodes = region.get("nodes") or []
+            if not any(not n.get("pro_only") and n.get("ip") for n in nodes):
+                continue
+            cc = region["short_name"].split("-")[0].upper()
+            names.setdefault(cc, set()).add(region.get("name") or cc)
+    out = {}
+    for cc, group in names.items():
+        common = []
+        for parts in zip(*[n.split() for n in group]):
+            if len(set(parts)) != 1:
+                break
+            common.append(parts[0])
+        out[cc] = " ".join(common) or cc
+    return out
+
+
+UI_HTML = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>windscribe 節點</title>
+<style>
+:root{
+  --bg:#0f1115; --fg:#e8eaf0; --muted:#8b93a7; --line:#232838; --card:#161a24;
+  --accent:#4da3ff; --ok:#3ecf8e; --warn:#d8a93b; --err:#e5544b;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f5f6fa;--fg:#161a22;--muted:#5d6577;--line:#e1e4ec;--card:#fff;
+        --accent:#1f6feb;--ok:#17945c;--warn:#96690b;--err:#c0342c}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+       justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:18px;font-weight:650}
+.sub{color:var(--muted);font-size:12px}
+#chips{display:flex;flex-wrap:wrap;gap:8px;padding:14px 22px 0}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;
+      padding:3px 11px;font-size:12px;color:var(--muted)}
+.chip b{color:var(--fg);font-weight:600;margin-left:4px}
+main{padding:14px 22px 48px}
+#list{display:grid;grid-template-columns:repeat(auto-fill,minmax(344px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+      padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uid{font-weight:650;font-size:15px;overflow-wrap:anywhere}
+.badge{font-size:11px;padding:2px 8px;border-radius:999px;
+       border:1px solid currentColor;white-space:nowrap}
+.badge.ok{color:var(--ok)} .badge.warn{color:var(--warn)} .badge.err{color:var(--err)}
+.row{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.row .k{color:var(--muted);flex:0 0 66px}
+.row .v{overflow-wrap:anywhere;min-width:0;flex:1}
+code,.mono{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:5px}
+.bar>i{display:block;height:100%;background:var(--ok)}
+.bar>i.warn{background:var(--warn)} .bar>i.err{background:var(--err)}
+button{font:inherit;border-radius:8px;border:1px solid var(--line);
+       background:transparent;color:var(--fg);padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{filter:brightness(1.08);color:#fff}
+button.danger{color:var(--err);border-color:var(--err)}
+button.danger:hover{background:var(--err);color:#fff}
+button.link{padding:0;border:0;background:none;color:var(--accent);text-align:left}
+button.link:hover{text-decoration:underline}
+.card-actions{display:flex;gap:8px;margin-top:4px}
+.empty{color:var(--muted);padding:28px;text-align:center;
+       border:1px dashed var(--line);border-radius:12px}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--card);
+       color:var(--fg);padding:18px 20px;width:min(430px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog h2{margin:0 0 10px;font-size:15px}
+dialog p{margin:0 0 14px;color:var(--muted);overflow-wrap:anywhere}
+dialog label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+dialog input,dialog select{width:100%;padding:8px 10px;border-radius:8px;
+       border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+.dlg-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+       background:var(--card);border:1px solid var(--line);border-radius:10px;
+       padding:9px 14px;font-size:13px;box-shadow:0 8px 26px rgba(0,0,0,.25);
+       opacity:0;pointer-events:none;transition:opacity .18s;max-width:90vw}
+#toast.show{opacity:1}
+#toast.err{color:var(--err);border-color:var(--err)}
+#busy{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;
+      place-items:center;z-index:20}
+#busy.show{display:grid}
+#busy span{background:var(--card);border:1px solid var(--line);border-radius:12px;
+           padding:14px 20px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>windscribe 節點</h1><div class="sub" id="hostline"></div></div>
+  <div style="display:flex;gap:8px">
+    <button id="refresh">重新整理</button>
+    <button id="add" class="primary">新增節點</button>
+  </div>
+</header>
+<div id="chips"></div>
+<main><div id="list"></div></main>
+<div id="busy"><span id="busytext">處理中…</span></div>
+<div id="toast"></div>
+
+<dialog id="dlg-add">
+  <h2>新增節點</h2>
+  <label for="add-uid">名稱 (uid)</label>
+  <input id="add-uid" placeholder="例如 laptop" autocomplete="off" spellcheck="false">
+  <label for="add-country">國家（自動 = 全球隨機）</label>
+  <select id="add-country"></select>
+  <div class="dlg-actions">
+    <button data-close>取消</button>
+    <button class="primary" id="add-ok">建立</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-country">
+  <h2>切換國家</h2>
+  <p id="cc-who"></p>
+  <label for="cc-sel">國家</label>
+  <select id="cc-sel"></select>
+  <p class="sub" style="margin:12px 0 0">該國免費節點隨機挑一個切換；公開端口不變，
+     既有連線在背景 drain 後才斷。</p>
+  <div class="dlg-actions">
+    <button data-close>取消</button>
+    <button class="primary" id="cc-ok">切換</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-del">
+  <h2>刪除節點</h2>
+  <p id="del-who"></p>
+  <div class="dlg-actions">
+    <button data-close>取消</button>
+    <button class="danger" id="del-ok">確定刪除</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const BASE = location.pathname.slice(-1) === "/" ? location.pathname : location.pathname + "/";
+let S = null, target = null, toastTimer = 0;
+const $ = s => document.querySelector(s);
+
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  if (props) for (const k in props) {
+    const v = props[k];
+    if (v == null) continue;
+    if (k === "class") n.className = v;
+    else if (k === "style") n.setAttribute("style", v);
+    else if (k === "onclick") n.addEventListener("click", v);
+    else n[k] = v;
+  }
+  for (const kid of kids) if (kid != null && kid !== false) {
+    n.append(kid.nodeType ? kid : String(kid));
+  }
+  return n;
+}
+
+async function api(action, params, method) {
+  const u = new URL(BASE + action, location.href);
+  for (const k in (params || {})) if (params[k] != null) u.searchParams.set(k, params[k]);
+  const r = await fetch(u, {cache: "no-store", method: method || "GET"});
+  const t = await r.text();
+  if (!r.ok) throw new Error(t.trim() || ("HTTP " + r.status));
+  try { return JSON.parse(t); } catch { return t; }
+}
+
+function toast(msg, err) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (err ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 4200);
+}
+
+function busy(on, text) {
+  $("#busytext").textContent = text || "處理中…";
+  $("#busy").classList.toggle("show", !!on);
+}
+
+function fmtGB(n) {
+  if (n == null || isNaN(n)) return "—";
+  return (n / 1073741824).toFixed(1) + " GB";
+}
+
+function fmtBytes(n) {
+  if (n == null || isNaN(n)) return "—";
+  const u = ["B", "KiB", "MiB", "GiB"]; let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i ? 1 : 0) + " " + u[i];
+}
+
+function ccOf(i) { return (i.country || "").split("-")[0].toUpperCase(); }
+function countryLabel(i) {
+  const cc = ccOf(i);
+  if (!cc) return "未知";
+  const name = S.countries[cc];
+  return !name || name === cc ? cc : name + " (" + cc + ")";
+}
+
+function fillCountries(sel) {
+  sel.textContent = "";
+  sel.append(el("option", {value: ""}, "自動 (全球隨機)"));
+  const codes = Object.keys(S.countries || {})
+    .sort((a, b) => S.countries[a].localeCompare(S.countries[b]));
+  for (const code of codes) {
+    const name = S.countries[code];
+    sel.append(el("option", {value: code}, name === code ? code : name + " (" + code + ")"));
+  }
+}
+
+async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已複製 " + text);
+  } catch { toast(text); }
+}
+
+function card(i) {
+  const host = S.host || location.hostname;
+  const socks = "socks5://" + host + ":" + i.public_port;
+  const http = "http://" + host + ":" + i.public_port;
+  const q = i.quota || {};
+  const pct = q.pct == null ? null : Math.min(100, Math.max(0, q.pct));
+  const state = !i.up ? ["err", "離線"]
+    : q.exhausted ? ["warn", "額度用完"]
+    : q.bad ? ["warn", "帳號失效"]
+    : ["ok", "運作中"];
+  const row = (k, ...v) => el("div", {class: "row"},
+    el("span", {class: "k"}, k), el("span", {class: "v"}, ...v));
+  const qtext = pct == null ? "—"
+    : fmtBytes(q.used_bytes) + " / " + fmtBytes(q.limit_bytes) + " · " + q.pct + "%";
+  const qbar = pct == null ? null : el("div", {class: "bar"},
+    el("i", {class: pct >= 92 ? "err" : pct >= 75 ? "warn" : "",
+             style: "width:" + pct + "%"}));
+  return el("div", {class: "card"},
+    el("div", {class: "card-top"},
+      el("div", {class: "uid"}, i.uid),
+      el("span", {class: "badge " + state[0]}, state[1])),
+    row("端口", el("code", null, String(i.public_port))),
+    row("SOCKS5", el("button", {
+      class: "link mono", title: "點擊複製", onclick: () => copy(socks)}, socks)),
+    row("HTTP", el("button", {
+      class: "link mono", title: "點擊複製", onclick: () => copy(http)}, http)),
+    row("國家", countryLabel(i)),
+    row("節點", i.node ? i.node + (i.node_ip ? " · " + i.node_ip : "") : "—"),
+    row("額度", qtext, qbar),
+    row("帳號", (i.batch || []).length + " 個"),
+    row("連線數", String(i.active || 0)),
+    el("div", {class: "card-actions"},
+      el("button", {onclick: () => openCountry(i)}, "切換國家"),
+      el("button", {class: "danger", onclick: () => openDelete(i)}, "刪除")));
+}
+
+function render() {
+  $("#hostline").textContent = (S.host || location.hostname) + " · 每 15 秒自動更新";
+  const chips = $("#chips");
+  chips.textContent = "";
+  const chip = (label, value) => chips.append(
+    el("span", {class: "chip"}, label, el("b", null, String(value))));
+  const a = S.accounts || {};
+  chip("節點", S.instances.length);
+  chip("帳號", a.total || 0);
+  chip("使用中", a.in_use || 0);
+  chip("失效", a.bad || 0);
+  chip("額度用完", a.exhausted || 0);
+  chip("總用量", fmtBytes(a.used_bytes) + " / " + fmtBytes(a.limit_bytes));
+  const list = $("#list");
+  list.textContent = "";
+  if (!S.instances.length) {
+    list.append(el("div", {class: "empty"}, "目前沒有節點。按右上角「新增節點」建立一個。"));
+    return;
+  }
+  for (const i of S.instances) list.append(card(i));
+}
+
+async function refresh() {
+  try {
+    S = await api("ui-state");
+    render();
+  } catch (e) {
+    toast("載入失敗：" + e.message, true);
+  }
+}
+
+function openCountry(i) {
+  target = i;
+  $("#cc-who").textContent =
+    i.uid + "：公開端口 " + i.public_port + " 不變。";
+  fillCountries($("#cc-sel"));
+  $("#cc-sel").value = ccOf(i);
+  $("#dlg-country").showModal();
+}
+
+function openDelete(i) {
+  target = i;
+  $("#del-who").textContent =
+    "確定要刪除「" + i.uid + "」？會停止它的 OpenVPN 隧道、釋放帳號與端口 " +
+    i.public_port + "，無法復原。";
+  $("#dlg-del").showModal();
+}
+
+$("#refresh").onclick = refresh;
+$("#add").onclick = () => {
+  $("#add-uid").value = "";
+  fillCountries($("#add-country"));
+  $("#dlg-add").showModal();
+  setTimeout(() => $("#add-uid").focus(), 30);
+};
+document.querySelectorAll("[data-close]").forEach(b => {
+  b.onclick = () => b.closest("dialog").close();
+});
+
+$("#add-ok").onclick = async () => {
+  const uid = $("#add-uid").value.trim();
+  if (!uid) { toast("請填節點名稱", true); return; }
+  const country = $("#add-country").value;
+  $("#dlg-add").close();
+  busy(true, "正在建立「" + uid + "」…");
+  try {
+    await api("register", {uid, country}, "POST");
+    toast("已建立 " + uid);
+  } catch (e) { toast("建立失敗：" + e.message, true); }
+  finally { busy(false); refresh(); }
+};
+
+$("#cc-ok").onclick = async () => {
+  if (!target) return;
+  const uid = target.uid, country = $("#cc-sel").value;
+  $("#dlg-country").close();
+  busy(true, "切換「" + uid + "」到 " + (country || "自動") + "…");
+  try {
+    await api("country", {uid, country});
+    toast(uid + " 已切換到 " + (country || "自動"));
+  } catch (e) { toast("切換失敗：" + e.message, true); }
+  finally { busy(false); refresh(); }
+};
+
+$("#del-ok").onclick = async () => {
+  if (!target) return;
+  const uid = target.uid;
+  $("#dlg-del").close();
+  busy(true, "刪除「" + uid + "」…");
+  try {
+    await api("delete", {uid});
+    toast("已刪除 " + uid);
+  } catch (e) { toast("刪除失敗：" + e.message, true); }
+  finally { busy(false); refresh(); }
+};
+
+refresh();
+setInterval(() => {
+  if (!document.querySelector("dialog[open]")) refresh();
+}, 15000);
+</script>
+</body>
+</html>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, obj, ctype="application/json"):
+        body = (json.dumps(obj, ensure_ascii=False, indent=1) if ctype == "application/json"
+                else obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype + "; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *a):
+        print("[http] " + fmt % a, flush=True)
+
+    def _q(self):
+        u = urlparse(self.path)
+        path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
+        if UI_TOKEN and (path == "/" + UI_TOKEN or path.startswith("/" + UI_TOKEN + "/")):
+            # token 前綴要剝掉,UI 頁面的相對路徑才打得到同一組端點
+            rest = path[len(UI_TOKEN) + 1:]
+            return rest or "/", q, True
+        return path, q, False
+
+    def do_GET(self):
+        path, q, via_ui = self._q()
+        if path == "/" and via_ui:
+            return self._send(200, UI_HTML, ctype="text/html")
+        if path == "/ui-state":
+            return self._send(200, self._ui_state())
+        if path in ("/", "/ui"):
+            return self._send(200, {"service": "windscribe-pool", "front_base": FRONT_BASE,
+                                    "public_host": PUBLIC_HOST, "ui": bool(UI_TOKEN),
+                                    "endpoints": ["/status", "/register", "/country", "/rotate",
+                                                  "/accounts", "/nodes", "/sub", "/delete",
+                                                  "/ui-state"]})
+        if path == "/status":
+            return self._send(200, {"nodes": [node_json(u) for u in STATE["nodes"]],
+                                    "accounts": self._accounts(),
+                                    "free_nodes": len(free_nodes()),
+                                    "serverlist_age": (time.time() - os.path.getmtime(SERVERLIST)
+                                                       if os.path.exists(SERVERLIST) else None)})
+        if path == "/accounts":
+            return self._send(200, {"accounts": self._accounts()})
+        if path == "/accounts/reset":
+            label = q.get("label", "")
+            mark_account(label, bad=False, exhausted=False, error="manual reset")
+            return self._send(200, {"ok": True, "label": label})
+        if path == "/nodes":
+            pool = free_nodes()
+            cc = (q.get("country") or "").upper()
+            if cc:
+                pool = [n for n in pool if node_country(n) == cc]
+            counts = {}
+            for n in free_nodes():
+                counts[n["country"]] = counts.get(n["country"], 0) + 1
+            return self._send(200, {"country": cc or None, "countries": counts,
+                                    "free_nodes": pool})
+        if path == "/sub":
+            return self._send(200, self._sub(q.get("uid")), ctype="text/yaml")
+        if path == "/rotate":
+            cc = q.get("country")
+            node = rotate_node(cc, key=q.get("key"))
+            if not node:
+                return self._send(404, {"ok": False, "error": "no free node for that country"})
+            uid = q.get("uid")
+            if uid:
+                meta, err = switch_node(uid, node)
+                if err:
+                    return self._send(500, {"ok": False, "error": err, "node_ip": node["ip"]})
+                rot = STATE.get("rotate", {}).get(cc.upper() if cc else "ALL", {})
+                return self._send(200, {"ok": True, "uid": uid, "node": node["hostname"],
+                                        "node_ip": node["ip"], "country": node["country"],
+                                        "public_port": meta["public_port"],
+                                        "progress": f"{rot.get('pos',0)}/{rot.get('size',0)}"})
+            rot = STATE.get("rotate", {}).get(cc.upper() if cc else "ALL", {})
+            return self._send(200, {"ok": True, "node": node["hostname"], "node_ip": node["ip"],
+                                    "country": node["country"],
+                                    "progress": f"{rot.get('pos',0)}/{rot.get('size',0)}"})
+        if path == "/country":
+            uid = q.get("uid")
+            if not uid:
+                return self._send(400, {"error": "uid required"})
+            node = None
+            if q.get("node"):
+                node = {"ip": q["node"], "hostname": q.get("node"), "country": q.get("cc", "")}
+            else:
+                node = pick_node(q.get("country"))
+            if not node:
+                return self._send(400, {"error": "no free node for that country"})
+            meta, err = switch_node(uid, node)
+            if err:
+                return self._send(500, {"error": err})
+            return self._send(200, {"ok": True, "uid": uid, "node": node["hostname"],
+                                    "node_ip": node["ip"], "public_port": meta["public_port"]})
+        if path == "/delete":
+            return self._send(200, {"deleted": delete_node(q.get("uid", ""))})
+        return self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        path, q, _ = self._q()
+        if path == "/register":
+            uid = q.get("uid")
+            if not uid:
+                return self._send(400, {"error": "uid required"})
+            meta = node_meta(uid)
+            if meta and meta.get("cred") and uid in NODES:
+                return self._send(200, {"ok": True, **node_json(uid)})
+            node = None
+            if q.get("node"):
+                node = {"ip": q["node"], "hostname": q.get("node"), "country": q.get("cc", "")}
+            else:
+                node = pick_node(q.get("country"))
+            if not node:
+                return self._send(400, {"ok": False,
+                                        "error": "no free node (country has none?)"})
+            meta, err = ensure_node(uid, node)
+            if err:
+                return self._send(500, {"ok": False, "error": err})
+            return self._send(200, {"ok": True, **node_json(uid)})
+        if path == "/delete":
+            return self._send(200, {"deleted": delete_node(q.get("uid", ""))})
+        return self._send(404, {"error": "not found"})
+
+    def _accounts(self):
+        used = in_use_labels()
+        out = []
+        for a in load_accounts():
+            lab = label_of(a)
+            st = acct_state(lab)
+            u, lim = acct_used(lab), acct_limit(a)
+            out.append({"label": lab, "in_use": used.get(lab, 0), "used_bytes": u,
+                        "limit_bytes": lim, "pct": round(u / lim * 100, 1) if lim else None,
+                        "bad": bool(st.get("bad")), "exhausted": bool(st.get("exhausted")),
+                        "datacenter": a.get("datacenter", ""), "node": a.get("node", ""),
+                        "last_error": st.get("last_error", ""),
+                        "reported": st.get("reported")})
+        return out
+
+    def _ui_state(self):
+        """web UI 一次抓完的狀態。"""
+        accts = self._accounts()
+        return {"host": PUBLIC_HOST or BIND_HOST,
+                "instances": [node_json(u) for u in STATE["nodes"]],
+                "countries": country_names(),
+                "accounts": {"total": len(accts),
+                             "in_use": sum(1 for a in accts if a["in_use"]),
+                             "bad": sum(1 for a in accts if a["bad"]),
+                             "exhausted": sum(1 for a in accts if a["exhausted"]),
+                             "used_bytes": sum(a["used_bytes"] or 0 for a in accts),
+                             "limit_bytes": sum(a["limit_bytes"] or 0 for a in accts)}}
+
+    def _sub(self, only_uid=None):
+        lines = ["proxies:"]
+        picked = [u for u in STATE["nodes"] if not only_uid or u == only_uid]
+        for uid in picked:
+            meta = STATE["nodes"][uid]
+            lines += [f"  - name: ws-{uid}",
+                      "    type: socks5",
+                      f"    server: {PUBLIC_HOST}",
+                      f"    port: {meta['public_port']}",
+                      "    udp: false"]
+        if not picked:
+            lines.append("  []")
+        lines += ["proxy-groups:", "  - name: WS", "    type: select",
+                  "    proxies: [" + ", ".join(f"ws-{u}" for u in picked) + "]"
+                  if picked else "    proxies: [DIRECT]",
+                  "rules:", "  - MATCH,WS"]
+        return "\n".join(lines) + "\n"
+
+
+def main():
+    load_state()
+    os.makedirs(INBOX, exist_ok=True)
+    ingest_inbox()
+    roll_month()
+    log(f"API on {BIND_HOST}:{API_PORT} front {FRONT_BASE}+ inner {INNER_BASE}+ "
+        f"public {PUBLIC_HOST} accounts={len(load_accounts())} free_nodes={len(free_nodes())}")
+    if UI_TOKEN:
+        if "/" in UI_TOKEN:
+            log("UI_TOKEN 不可含 '/',web ui 停用")
+            globals()["UI_TOKEN"] = ""
+        else:
+            log(f"web ui on http://{BIND_HOST}:{API_PORT}/{UI_TOKEN}/")
+    for uid, meta in list(STATE["nodes"].items()):
+        try:
+            meta["_restore"] = True
+            m, err = ensure_node(uid, None)
+            log(f"restore {uid}: {'ok' if not err else err}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"restore {uid} failed: {exc}")
+    threading.Thread(target=supervise, daemon=True).start()
+    ThreadingHTTPServer((BIND_HOST, API_PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
