@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>VPNGate 節點</title>
+<style>
+:root{
+  --bg:#0f1115; --fg:#e8eaf0; --muted:#8b93a7; --line:#232838; --card:#161a24;
+  --accent:#4da3ff; --ok:#3ecf8e; --warn:#d8a93b; --err:#e5544b;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f5f6fa;--fg:#161a22;--muted:#5d6577;--line:#e1e4ec;--card:#fff;
+        --accent:#1f6feb;--ok:#17945c;--err:#c0342c}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+       justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:18px;font-weight:650}
+.sub{color:var(--muted);font-size:12px}
+#chips{display:flex;flex-wrap:wrap;gap:8px;padding:14px 22px 0}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;
+      padding:3px 11px;font-size:12px;color:var(--muted)}
+.chip b{color:var(--fg);font-weight:600;margin-left:4px}
+main{padding:14px 22px 48px}
+#list{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+      padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uid{font-weight:650;font-size:15px;overflow-wrap:anywhere}
+.badge{font-size:11px;padding:2px 8px;border-radius:999px;
+       border:1px solid currentColor;white-space:nowrap}
+.badge.ok{color:var(--ok)} .badge.err{color:var(--err)} .badge.muted{color:var(--muted)}
+.row{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.row .k{color:var(--muted);flex:0 0 74px}
+.row .v{overflow-wrap:anywhere}
+code,.mono{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+button{font:inherit;border-radius:8px;border:1px solid var(--line);
+       background:transparent;color:var(--fg);padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{filter:brightness(1.08);color:#fff}
+button[disabled]{opacity:.5;cursor:default}
+.card-actions{display:flex;gap:8px;margin-top:4px}
+.empty{color:var(--muted);padding:28px;text-align:center;
+       border:1px dashed var(--line);border-radius:12px}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+       background:var(--card);border:1px solid var(--line);border-radius:10px;
+       padding:9px 14px;font-size:13px;box-shadow:0 8px 26px rgba(0,0,0,.25);
+       opacity:0;pointer-events:none;transition:opacity .18s;max-width:90vw}
+#toast.show{opacity:1}
+#toast.err{color:var(--err);border-color:var(--err)}
+#busy{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;
+      place-items:center;z-index:20}
+#busy.show{display:grid}
+#busy span{background:var(--card);border:1px solid var(--line);border-radius:12px;
+           padding:14px 20px;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>VPNGate 節點</h1><div class="sub" id="hostline"></div></div>
+  <button id="refresh">重新整理</button>
+</header>
+<div id="chips"></div>
+<main><div id="list"></div></main>
+<div id="busy"><span id="busytext">處理中…</span></div>
+<div id="toast"></div>
+<script>
+const BASE = location.pathname.slice(-1) === "/" ? location.pathname : location.pathname + "/";
+const API = BASE + "ui-state";
+const ROTATE = BASE + "api/rotate";
+let S = {clients: {}, nodes: [], host: ""};
+
+const $ = s => document.querySelector(s);
+function el(tag, attrs, kids) {
+  const e = document.createElement(tag);
+  for (const k in attrs || {}) {
+    if (k === "style") e.setAttribute("style", attrs[k]);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+    else e[k] = attrs[k];
+  }
+  (kids || []).forEach(c => e.append(c.nodeType ? c : document.createTextNode(c)));
+  return e;
+}
+function toast(msg, bad) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (bad ? " err" : "");
+  setTimeout(() => t.className = "", 2600);
+}
+function busy(on, msg) {
+  $("#busytext").textContent = msg || "處理中…";
+  $("#busy").className = on ? "show" : "";
+}
+
+function card(uid, rec) {
+  const alive = rec.alive;
+  const badge = alive === true
+    ? el("span", {className: "badge ok"}, ["節點存活"])
+    : alive === false
+      ? el("span", {className: "badge err"}, ["節點離線"])
+      : el("span", {className: "badge muted"}, ["狀態未知"]);
+  const rotate = el("button", {className: "primary", onclick: () => rotate(uid)},
+                    ["隨機切換"]);
+  return el("div", {className: "card"}, [
+    el("div", {className: "card-top"}, [el("span", {className: "uid"}, [uid]), badge]),
+    el("div", {className: "row"}, [el("span", {className: "k"}, ["port"]),
+                                   el("span", {className: "v mono"}, [String(rec.port ?? "-")])]),
+    el("div", {className: "row"}, [el("span", {className: "k"}, ["node"]),
+                                   el("span", {className: "v mono"}, [rec.node || "-"])]),
+    el("div", {className: "card-actions"}, [rotate]),
+  ]);
+}
+
+function render() {
+  const list = $("#list");
+  list.replaceChildren();
+  const clients = S.clients || {};
+  const uids = Object.keys(clients).sort();
+  $("#chips").replaceChildren(
+    el("span", {className: "chip"}, ["客戶端 ", el("b", {}, [String(uids.length)])]),
+    el("span", {className: "chip"}, ["可用節點 ", el("b", {}, [String((S.nodes || []).length)])]),
+    el("span", {className: "chip"}, ["host ", el("b", {}, [S.host || "-"])]),
+  );
+  $("#hostline").textContent = (S.host || location.hostname) + " · 每 15 秒自動更新";
+  if (!uids.length) {
+    list.append(el("div", {className: "empty"}, ["尚無客戶端"]));
+    return;
+  }
+  for (const uid of uids) list.append(card(uid, clients[uid]));
+}
+
+async function api(url) {
+  const r = await fetch(url, {cache: "no-store"});
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function refresh() {
+  try { S = await api(API); render(); }
+  catch (e) { toast("載入失敗：" + e.message, true); }
+}
+async function rotate(uid) {
+  busy(true, "正在為「" + uid + "」換節點…");
+  try {
+    const r = await api(ROTATE + "?uid=" + encodeURIComponent(uid));
+    toast(uid + " 已切換：" + (r.node || "-"));
+  } catch (e) { toast("切換失敗：" + e.message, true); }
+  finally { busy(false); refresh(); }
+}
+
+$("#refresh").onclick = refresh;
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
