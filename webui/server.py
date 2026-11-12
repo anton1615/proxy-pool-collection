@@ -103,10 +103,20 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._send(502, "VPNGate dashboard not built yet")
 
+    def _pools_js(self, cfg):
+        pools = {}
+        for pid, entry in cfg["pools"].items():
+            pools[pid] = {"label": entry.get("label", pid),
+                          "path": entry.get("tab_path", "/p/%s/" % pid)}
+        body = "const POOLS = " + json.dumps(pools, ensure_ascii=False) + ";\n"
+        self._send(200, body, "application/javascript; charset=utf-8")
+
     def _vg_ui_state(self, cfg):
         """Aggregate register.py /status + /nodes + controller liveness."""
-        api = cfg["pools"]["vg"]["upstream"].rstrip("/")
-        ctrl = os.environ.get("SHARED_MIHOMO_API", "http://127.0.0.1:7910").rstrip("/")
+        vg = cfg["pools"]["vg"]
+        api = vg["upstream"].rstrip("/")
+        ctrl = (vg.get("controller") or
+                os.environ.get("SHARED_MIHOMO_API", "http://127.0.0.1:7910")).rstrip("/")
 
         def get(url, timeout=5):
             with urllib.request.urlopen(url, timeout=timeout) as r:
@@ -171,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/":
             return self._shell()
+        if path == "/pools.js":
+            return self._pools_js(cfg)
         if path == "/p/vg" or path.startswith("/p/vg/"):
             rest = path[len("/p/vg/"):]
             if rest.startswith("/"):
