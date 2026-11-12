@@ -1,0 +1,4 @@
+# One URnetwork account seedphrase per line — a seedphrase IS the account
+# credential. chmod 600 this file, and never commit a real one.
+# The example below is 15 made-up words, deliberately not a valid mnemonic.
+example seedphrase words go here this line is not a real account credential

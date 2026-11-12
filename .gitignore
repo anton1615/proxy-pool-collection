@@ -1,0 +1,29 @@
+# Runtime configuration (copied from *.example at deploy time)
+config.json
+config.env
+register.json
+ovpn-template.json
+uitoken
+
+# Generated / state artifacts
+providers/
+publish/
+cache.db
+state.json
+serverlist.json
+accounts/
+inbox/
+logs/
+conf/
+*.pyc
+__pycache__/
+*.log
+
+# Python
+.venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

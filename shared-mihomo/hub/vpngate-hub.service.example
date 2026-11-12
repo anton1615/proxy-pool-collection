@@ -1,0 +1,12 @@
+[Unit]
+Description=official-only VPNGate node hub (one round)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=proxy
+EnvironmentFile=/etc/vpngate-hub/config.env
+ExecStart=/usr/bin/python3 -u /opt/vpngate-hub/vpngate-hub.py --once
+
+[Install]
+WantedBy=multi-user.target

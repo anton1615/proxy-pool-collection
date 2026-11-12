@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Proxy Pool Collection</title>
+<style>
+:root{
+  --bg:#0f1115; --fg:#e8eaf0; --muted:#8b93a7; --line:#232838; --card:#161a24;
+  --accent:#4da3ff; --ok:#3ecf8e; --err:#e5544b;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f5f6fa;--fg:#161a22;--muted:#5d6577;--line:#e1e4ec;--card:#fff;--accent:#1f6feb}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif;
+     height:100vh;display:flex;overflow:hidden}
+nav{width:210px;flex:0 0 210px;border-right:1px solid var(--line);
+    background:var(--card);display:flex;flex-direction:column;padding:18px 12px;gap:6px}
+nav h1{margin:0 0 4px;font-size:16px;font-weight:650;padding:0 10px}
+nav .sub{color:var(--muted);font-size:11px;padding:0 10px 16px}
+nav button{display:block;width:100%;text-align:left;font:inherit;
+  border:1px solid transparent;border-radius:9px;background:transparent;color:var(--fg);
+  padding:9px 12px;cursor:pointer}
+nav button:hover{border-color:var(--line)}
+nav button.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+nav .foot{margin-top:auto;color:var(--muted);font-size:11px;padding:0 10px}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+#bar{display:flex;align-items:center;gap:10px;padding:10px 16px;
+     border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+#bar b{color:var(--fg);font-weight:600}
+#err{display:none;margin:10px 16px 0;padding:10px 14px;border-radius:9px;
+     border:1px solid var(--err);color:var(--err);background:var(--card);font-size:13px}
+#frame{flex:1;width:100%;border:0;background:var(--bg)}
+@media (max-width:640px){
+  nav{width:100%;flex:0 0 auto;flex-direction:row;flex-wrap:wrap;height:auto;
+      border-right:0;border-bottom:1px solid var(--line);padding:10px}
+  nav h1,nav .sub,nav .foot{display:none}
+  nav button{width:auto;flex:1;text-align:center}
+  body{flex-direction:column}
+}
+</style>
+</head>
+<body>
+<nav>
+  <h1>Proxy Pool Collection</h1>
+  <div class="sub">四個出口池 · 一個 URL</div>
+  <button data-pool="foxy" class="active">FoxyVPN</button>
+  <button data-pool="urn">URnetwork</button>
+  <button data-pool="ws">Windscribe</button>
+  <button data-pool="vg">VPNGate</button>
+  <div class="foot">點標籤切換 · 同源反向代理</div>
+</nav>
+<main>
+  <div id="bar">目前：<b id="label">FoxyVPN</b> · <span id="url"></span></div>
+  <div id="err"></div>
+  <iframe id="frame" title="pool dashboard"></iframe>
+</main>
+<script src="/pools.js"></script>
+<script>
+// POOLS is defined by /pools.js, generated from the server's config.json.
+const frame = document.getElementById("frame");
+const err = document.getElementById("err");
+
+function show(pool) {
+  const p = POOLS[pool];
+  document.querySelectorAll("nav button").forEach(b =>
+    b.classList.toggle("active", b.dataset.pool === pool));
+  document.getElementById("label").textContent = p.label;
+  document.getElementById("url").textContent = location.host + p.path;
+  err.style.display = "none";
+  frame.src = p.path;
+}
+frame.addEventListener("error", () => {
+  err.textContent = "此 pool 暫時無法載入，其他標籤仍可使用。";
+  err.style.display = "block";
+});
+document.querySelectorAll("nav button").forEach(b =>
+  b.addEventListener("click", () => show(b.dataset.pool)));
+show("foxy");
+</script>
+</body>
+</html>
