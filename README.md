@@ -39,6 +39,12 @@ Open the printed URL. With no pool running, a tab shows an error panel and the
 other tabs keep working. The shell defaults to loopback; binding it to a tailnet
 address is an explicit opt-in in `config.json`.
 
+The fourth pool's services each ship a `config.example.env` and a
+`.service.example` under `shared-mihomo/{api,mihomo,hub,speed}/`. Copy each
+example to a gitignored runtime config, fill the placeholders, and start the
+units. `shared-mihomo/mihomo/ovpn-template.example.json` is the placeholder
+for the live `ovpn-template.json`.
+
 Run the credential scan before publishing:
 
 ```bash
