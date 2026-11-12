@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the official-only VPNGate hub every 30 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=vpngate-hub.service
+
+[Install]
+WantedBy=timers.target
