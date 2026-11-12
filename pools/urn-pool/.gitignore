@@ -1,0 +1,15 @@
+# account credentials — never commit
+pool.txt
+speed-pool.txt
+auth/
+logs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+db.sqlite
+hub.sqlite
+hub-open.json
+register_state.json
+
+__pycache__/
+*.pyc
