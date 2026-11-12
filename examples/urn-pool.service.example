@@ -1,0 +1,12 @@
+[Unit]
+Description=urn account pool service
+After=network-online.target
+
+[Service]
+# URNPROXY=/path/to/urnproxy   # if the binary is not at the built-in default
+ExecStart=/usr/bin/python3 %h/urn-pool/urnpool.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

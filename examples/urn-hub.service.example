@@ -1,0 +1,9 @@
+[Unit]
+Description=urn hub fetch round (global provider enumeration + open set)
+After=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=7200
+WorkingDirectory=%h/urn-pool
+ExecStart=/usr/bin/python3 %h/urn-pool/urn-hub.py
