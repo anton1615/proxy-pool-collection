@@ -42,7 +42,7 @@ RULES = [
 # Keep this list in sync with docs/RECON.md; revisit on every SHA bump.
 UPSTREAM_ALLOWLIST = re.compile(
     r"100\.100\.100\.101|100\.64\.0\.0/10|pool-host\.example\.ts\.net|"
-    r'"seedphrase"|"password"|Environment=PUBLIC_HOST='
+    r'"seedphrase"|"password"|Environment=PUBLIC_HOST=|BUILD_COMMIT'
 )
 
 
@@ -75,13 +75,15 @@ def scan(root):
                 for m in rx.finditer(text):
                     line = text.count("\n", 0, m.start()) + 1
                     snippet = m.group(0)[:60]
+                    context = text[max(0, m.start() - 80):m.end() + 80]
                     if not first_party:
                         # Vendored trees: allow only the documented literals,
-                        # and never a removed-source symbol or a PEM block.
+                        # and never a removed-source symbol, PEM, or token.
                         if label in {"removed-source-symbol", "pem", "token-prefix"}:
                             hits.append((rel, line, label, snippet))
-                        elif not UPSTREAM_ALLOWLIST.search(
-                                text[max(0, m.start() - 40):m.end() + 40]):
+                        elif label == "opaque-token" and "BUILD_COMMIT" in context:
+                            continue  # upstream build metadata, not a credential
+                        elif not UPSTREAM_ALLOWLIST.search(context):
                             hits.append((rel, line, label, snippet))
                     else:
                         hits.append((rel, line, label, snippet))
