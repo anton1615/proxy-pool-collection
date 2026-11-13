@@ -16,7 +16,7 @@ proxy-providers:
       interval: 600
 
 # One select group per listener port. Add more p79XX groups/listeners as needed;
-# keep the port range in sync with register.py SHARED_MIHOMO_PORT_BASE/END.
+# keep the port range in sync with register.py SHARED_MIHOMO_PORT_BASE/END (7911-7950).
 proxy-groups:
   - name: p7911
     type: select
@@ -31,6 +31,111 @@ proxy-groups:
     type: select
     use: [hub]
   - name: p7915
+    type: select
+    use: [hub]
+  - name: p7916
+    type: select
+    use: [hub]
+  - name: p7917
+    type: select
+    use: [hub]
+  - name: p7918
+    type: select
+    use: [hub]
+  - name: p7919
+    type: select
+    use: [hub]
+  - name: p7920
+    type: select
+    use: [hub]
+  - name: p7921
+    type: select
+    use: [hub]
+  - name: p7922
+    type: select
+    use: [hub]
+  - name: p7923
+    type: select
+    use: [hub]
+  - name: p7924
+    type: select
+    use: [hub]
+  - name: p7925
+    type: select
+    use: [hub]
+  - name: p7926
+    type: select
+    use: [hub]
+  - name: p7927
+    type: select
+    use: [hub]
+  - name: p7928
+    type: select
+    use: [hub]
+  - name: p7929
+    type: select
+    use: [hub]
+  - name: p7930
+    type: select
+    use: [hub]
+  - name: p7931
+    type: select
+    use: [hub]
+  - name: p7932
+    type: select
+    use: [hub]
+  - name: p7933
+    type: select
+    use: [hub]
+  - name: p7934
+    type: select
+    use: [hub]
+  - name: p7935
+    type: select
+    use: [hub]
+  - name: p7936
+    type: select
+    use: [hub]
+  - name: p7937
+    type: select
+    use: [hub]
+  - name: p7938
+    type: select
+    use: [hub]
+  - name: p7939
+    type: select
+    use: [hub]
+  - name: p7940
+    type: select
+    use: [hub]
+  - name: p7941
+    type: select
+    use: [hub]
+  - name: p7942
+    type: select
+    use: [hub]
+  - name: p7943
+    type: select
+    use: [hub]
+  - name: p7944
+    type: select
+    use: [hub]
+  - name: p7945
+    type: select
+    use: [hub]
+  - name: p7946
+    type: select
+    use: [hub]
+  - name: p7947
+    type: select
+    use: [hub]
+  - name: p7948
+    type: select
+    use: [hub]
+  - name: p7949
+    type: select
+    use: [hub]
+  - name: p7950
     type: select
     use: [hub]
 
@@ -60,6 +165,181 @@ listeners:
     listen: 127.0.0.1
     port: 7915
     proxy: p7915
+  - name: p7916
+    type: mixed
+    listen: 127.0.0.1
+    port: 7916
+    proxy: p7916
+  - name: p7917
+    type: mixed
+    listen: 127.0.0.1
+    port: 7917
+    proxy: p7917
+  - name: p7918
+    type: mixed
+    listen: 127.0.0.1
+    port: 7918
+    proxy: p7918
+  - name: p7919
+    type: mixed
+    listen: 127.0.0.1
+    port: 7919
+    proxy: p7919
+  - name: p7920
+    type: mixed
+    listen: 127.0.0.1
+    port: 7920
+    proxy: p7920
+  - name: p7921
+    type: mixed
+    listen: 127.0.0.1
+    port: 7921
+    proxy: p7921
+  - name: p7922
+    type: mixed
+    listen: 127.0.0.1
+    port: 7922
+    proxy: p7922
+  - name: p7923
+    type: mixed
+    listen: 127.0.0.1
+    port: 7923
+    proxy: p7923
+  - name: p7924
+    type: mixed
+    listen: 127.0.0.1
+    port: 7924
+    proxy: p7924
+  - name: p7925
+    type: mixed
+    listen: 127.0.0.1
+    port: 7925
+    proxy: p7925
+  - name: p7926
+    type: mixed
+    listen: 127.0.0.1
+    port: 7926
+    proxy: p7926
+  - name: p7927
+    type: mixed
+    listen: 127.0.0.1
+    port: 7927
+    proxy: p7927
+  - name: p7928
+    type: mixed
+    listen: 127.0.0.1
+    port: 7928
+    proxy: p7928
+  - name: p7929
+    type: mixed
+    listen: 127.0.0.1
+    port: 7929
+    proxy: p7929
+  - name: p7930
+    type: mixed
+    listen: 127.0.0.1
+    port: 7930
+    proxy: p7930
+  - name: p7931
+    type: mixed
+    listen: 127.0.0.1
+    port: 7931
+    proxy: p7931
+  - name: p7932
+    type: mixed
+    listen: 127.0.0.1
+    port: 7932
+    proxy: p7932
+  - name: p7933
+    type: mixed
+    listen: 127.0.0.1
+    port: 7933
+    proxy: p7933
+  - name: p7934
+    type: mixed
+    listen: 127.0.0.1
+    port: 7934
+    proxy: p7934
+  - name: p7935
+    type: mixed
+    listen: 127.0.0.1
+    port: 7935
+    proxy: p7935
+  - name: p7936
+    type: mixed
+    listen: 127.0.0.1
+    port: 7936
+    proxy: p7936
+  - name: p7937
+    type: mixed
+    listen: 127.0.0.1
+    port: 7937
+    proxy: p7937
+  - name: p7938
+    type: mixed
+    listen: 127.0.0.1
+    port: 7938
+    proxy: p7938
+  - name: p7939
+    type: mixed
+    listen: 127.0.0.1
+    port: 7939
+    proxy: p7939
+  - name: p7940
+    type: mixed
+    listen: 127.0.0.1
+    port: 7940
+    proxy: p7940
+  - name: p7941
+    type: mixed
+    listen: 127.0.0.1
+    port: 7941
+    proxy: p7941
+  - name: p7942
+    type: mixed
+    listen: 127.0.0.1
+    port: 7942
+    proxy: p7942
+  - name: p7943
+    type: mixed
+    listen: 127.0.0.1
+    port: 7943
+    proxy: p7943
+  - name: p7944
+    type: mixed
+    listen: 127.0.0.1
+    port: 7944
+    proxy: p7944
+  - name: p7945
+    type: mixed
+    listen: 127.0.0.1
+    port: 7945
+    proxy: p7945
+  - name: p7946
+    type: mixed
+    listen: 127.0.0.1
+    port: 7946
+    proxy: p7946
+  - name: p7947
+    type: mixed
+    listen: 127.0.0.1
+    port: 7947
+    proxy: p7947
+  - name: p7948
+    type: mixed
+    listen: 127.0.0.1
+    port: 7948
+    proxy: p7948
+  - name: p7949
+    type: mixed
+    listen: 127.0.0.1
+    port: 7949
+    proxy: p7949
+  - name: p7950
+    type: mixed
+    listen: 127.0.0.1
+    port: 7950
+    proxy: p7950
 
 rules:
   - MATCH,DIRECT

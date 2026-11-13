@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""shared-mihomo register API: uid -> port(7911-7930) + 隨機釘節點 + 節點操作.
+"""shared-mihomo register API: uid -> port(7911-7950) + 隨機釘節點 + 節點操作.
 
   GET /register?uid=N     -> 配一個空閒 port,釘一顆隨機活節點
   GET /rotate?uid=N       -> 原 port 重擲一顆隨機節點
@@ -17,7 +17,7 @@ STATE = os.environ.get("SHARED_MIHOMO_REG_STATE", os.path.join(BASE, "register.j
 API = os.environ.get("SHARED_MIHOMO_API", "http://127.0.0.1:7910")
 API_HOST = API.split("//", 1)[-1].split(":")[0]
 PORTS = list(range(int(os.environ.get("SHARED_MIHOMO_PORT_BASE", "7911")),
-                   int(os.environ.get("SHARED_MIHOMO_PORT_END", "7931"))))
+                   int(os.environ.get("SHARED_MIHOMO_PORT_END", "7951"))))
 # rotate 後斬掉這個 port 上閒置的 keep-alive 連線,讓下一個請求必走新節點(新出口 IP)。
 # KILL_RESP_GRACE 必須大於上游最大 token 間隔(實測 6s),否則活串流會被誤砍。
 KILL_RESP_GRACE = float(os.environ.get("KILL_RESP_GRACE", 15))

@@ -42,7 +42,8 @@ button{font:inherit;border-radius:8px;border:1px solid var(--line);
        background:transparent;color:var(--fg);padding:6px 12px;cursor:pointer}
 button:hover{border-color:var(--accent);color:var(--accent)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.primary:hover{filter:brightness(1.08);color:#fff}
+button.danger{color:var(--err);border-color:var(--err)}
+button.danger:hover{background:var(--err);color:#fff}
 button[disabled]{opacity:.5;cursor:default}
 .card-actions{display:flex;gap:8px;margin-top:4px}
 .empty{color:var(--muted);padding:28px;text-align:center;
@@ -73,6 +74,7 @@ button[disabled]{opacity:.5;cursor:default}
 const BASE = location.pathname.slice(-1) === "/" ? location.pathname : location.pathname + "/";
 const API = BASE + "ui-state";
 const ROTATE = BASE + "api/rotate";
+const DELETE = BASE + "api/delete";
 let S = {clients: {}, nodes: [], host: ""};
 
 const $ = s => document.querySelector(s);
@@ -106,13 +108,15 @@ function card(uid, rec) {
       : el("span", {className: "badge muted"}, ["狀態未知"]);
   const rotate = el("button", {className: "primary", onclick: () => rotate(uid)},
                     ["隨機切換"]);
+  const remove = el("button", {className: "danger", onclick: () => remove(uid)},
+                    ["移除"]);
   return el("div", {className: "card"}, [
     el("div", {className: "card-top"}, [el("span", {className: "uid"}, [uid]), badge]),
     el("div", {className: "row"}, [el("span", {className: "k"}, ["port"]),
                                    el("span", {className: "v mono"}, [String(rec.port ?? "-")])]),
     el("div", {className: "row"}, [el("span", {className: "k"}, ["node"]),
                                    el("span", {className: "v mono"}, [rec.node || "-"])]),
-    el("div", {className: "card-actions"}, [rotate]),
+    el("div", {className: "card-actions"}, [rotate, remove]),
   ]);
 }
 
@@ -160,6 +164,14 @@ async function rotate(uid) {
   finally { busy(false); refresh(); }
 }
 
+async function remove(uid) {
+  busy(true, "正在為「" + uid + "」釋放端口…");
+  try {
+    const r = await api(DELETE + "?uid=" + encodeURIComponent(uid));
+    toast(r.deleted ? uid + " 已移除" : uid + " 已不在名單中");
+  } catch (e) { toast("移除失敗：" + e.message, true); }
+  finally { busy(false); refresh(); }
+}
 $("#refresh").onclick = refresh;
 refresh();
 setInterval(refresh, 15000);
