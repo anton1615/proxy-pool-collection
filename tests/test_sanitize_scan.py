@@ -41,5 +41,27 @@ class SanitizeScanTest(unittest.TestCase):
         self.assertEqual(sanitize_scan.scan(REPO), [],
                          "first-party files must have zero scanner hits")
 
+    def test_flags_private_literal_in_docker_tree(self):
+        # The new docker/ tree must be first-party scanned, not silently skipped.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "docker"))
+            with open(os.path.join(root, "docker", "config.example.json"), "w") as f:
+                f.write('{"upstream": "http://10.0.0.5:8080"}\n')
+            hits = sanitize_scan.scan(root)
+            self.assertTrue(any(h[0].startswith("docker" + os.sep) and h[2] == "private-ip"
+                                for h in hits),
+                            "a private literal under docker/ must be flagged")
+
+    def test_flags_allowlisted_literal_in_docker_tree(self):
+        # Pins docker/ being in FIRST_PARTY_TOP: a documented upstream literal
+        # is tolerated only in vendored trees, never in first-party docker/.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "docker"))
+            with open(os.path.join(root, "docker", "config.example.json"), "w") as f:
+                f.write("curl http://100.100.100.101:8080/register\n")
+            hits = sanitize_scan.scan(root)
+            self.assertTrue(any(h[0].startswith("docker" + os.sep) for h in hits),
+                            "an upstream literal under first-party docker/ must be flagged")
+
 if __name__ == "__main__":
     unittest.main()

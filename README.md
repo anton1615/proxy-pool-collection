@@ -44,8 +44,10 @@ extended with a first-party reverse proxy and a first-party VPNGate dashboard.
 - 🧾 **No credentials in the repo** — every live value lives in `*.example`
   files and a gitignored runtime set; the brand claim is *service architecture
   only*
-- ⚡ **Latest release is `main`** — no containers, no database, no extra deps;
-  `python3 webui/server.py` and you're looking at four dashboards
+- ⚡ **Two ways to run** — `python3 webui/server.py` for the bare-metal
+  deployment (no database, no extra deps), or `docker compose up` for a
+  one-command demo; the Compose stack adds no runtime dependency to the
+  bare-metal path
 
 ## 🤔 Why wrap pools this way?
 
@@ -111,6 +113,8 @@ speed daemon (`vpngate-speed.py`), and the Rotate dashboard.
 
 ## 🚀 Install
 
+### Bare metal
+
 Needs Python 3.11+; no other dependencies.
 
 ```bash
@@ -128,8 +132,29 @@ keep working. Binding a tailnet address is an explicit opt-in in `config.json`
 (`listen`), and is not automatic — the shell is an **unauthenticated** reverse
 proxy and its trust boundary is the network it binds.
 
-The 4th pool's services each ship a `config.example.env` and a systemd unit
-under `shared-mihomo/{api,mihomo,hub,speed}/`:
+### One-command demo (Docker Compose)
+
+Needs Docker Engine with the Compose plugin. No build step, no config copy:
+
+```bash
+git clone https://github.com/anton1615/proxy-pool-collection.git
+cd proxy-pool-collection
+docker compose up
+```
+
+Open `http://127.0.0.1:8787/`. All four tabs render with mock data — a single
+stdlib service stands in for every upstream, so no real pool accounts, VPN
+tunnels, or mihomo are involved. `docker compose down` stops the demo. The
+stack runs the same `webui/server.py` unchanged from the official
+`python:3.11-slim` image, mounting `docker/config.example.json` via
+`PPC_CONFIG`; edit that file (or repoint `PPC_CONFIG`) to wire real pools.
+
+This path is **demo/dev only**. The port is published on `127.0.0.1` because
+the shell is unauthenticated; see Security & trust model below.
+
+Still on the bare-metal path, the 4th pool's services each ship a
+`config.example.env` and a systemd unit under
+`shared-mihomo/{api,mihomo,hub,speed}/`:
 
 ```bash
 cp shared-mihomo/api/config.example.env shared-mihomo/api/config.env
@@ -175,6 +200,12 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 - The shell is an **unauthenticated reverse proxy**. Its trust boundary is the
   network it binds; there is no login, no session, no CSRF token.
 - The pools themselves were already unauthenticated on the host.
+- The Compose demo publishes its port on `127.0.0.1` only (`127.0.0.1:8787:8787`).
+  A bare `8787:8787` would bind all host interfaces and expose this
+  unauthenticated proxy to any network peer. `host_allowlist` is a forgeable
+  `Host`-header check, **not** IP access control — the loopback publish is the
+  boundary. Pointing the demo config at real pools is the operator's
+  responsibility, not a trust boundary this project provides.
 - It is **not an open relay**: upstream URLs are built by string concatenation
   (no `urljoin`), `..`/leading `//` paths are rejected, only an allowlisted
   header set is forwarded, `Host` is replaced with the upstream host, upstream
@@ -194,6 +225,10 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 ```
 .
 ├── README.md
+├── docker-compose.yml          # one-command demo stack
+├── docker/                     # demo-only config + single mock upstream
+│   ├── config.example.json     # all four pools -> one mock on :8080
+│   └── mock_upstream.py        # stdlib HTTP mock
 ├── webui/                      # the unified shell
 │   ├── server.py               # stdlib reverse proxy (SSRF-safe)
 │   ├── index.html              # left-sidebar tab shell
