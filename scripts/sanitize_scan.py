@@ -19,7 +19,7 @@ import os
 import re
 import sys
 
-FIRST_PARTY_TOP = {"webui", "shared-mihomo", "windscribe-host-webui", "scripts"}
+FIRST_PARTY_TOP = {"webui", "shared-mihomo", "windscribe-host-webui", "scripts", "docker"}
 FIRST_PARTY_FILES = {"README.md", "LICENSE", ".gitignore"}
 SKIP_TOP = {"docs", "tests"}
 SKIP_FILES = {"sanitize_scan.py"}
@@ -27,6 +27,7 @@ VENDOR_PREFIX = "pools/"
 
 RULES = [
     ("private-ip", re.compile(r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b")),
+    ("private-ip", re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b")),
     ("tailnet", re.compile(r"\b[a-z0-9-]+\.ts\.net\b", re.I)),
     ("token-prefix", re.compile(r"\b(?:tskey-|ibk_|sk-[A-Za-z0-9]{20,})")),
     ("opaque-token", re.compile(r"(?<![A-Za-z0-9])[A-Fa-f0-9]{40}(?![A-Za-z0-9])")),

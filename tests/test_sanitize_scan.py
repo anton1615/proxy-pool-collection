@@ -41,5 +41,16 @@ class SanitizeScanTest(unittest.TestCase):
         self.assertEqual(sanitize_scan.scan(REPO), [],
                          "first-party files must have zero scanner hits")
 
+    def test_flags_private_literal_in_docker_tree(self):
+        # The new docker/ tree must be first-party scanned, not silently skipped.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "docker"))
+            with open(os.path.join(root, "docker", "config.example.json"), "w") as f:
+                f.write('{"upstream": "http://10.0.0.5:8080"}\n')
+            hits = sanitize_scan.scan(root)
+            self.assertTrue(any(h[0].startswith("docker" + os.sep) and h[2] == "private-ip"
+                                for h in hits),
+                            "a private literal under docker/ must be flagged")
+
 if __name__ == "__main__":
     unittest.main()

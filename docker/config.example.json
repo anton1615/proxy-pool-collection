@@ -1,0 +1,29 @@
+{
+  "_about": "Demo config mounted at PPC_CONFIG by docker-compose.yml. All four upstreams and the VPNGate controller point at the single mock service on one port; Docker network aliases resolve names, not ports. Copy/edit for your own upstreams; never commit real hosts or credentials.",
+  "listen": "0.0.0.0",
+  "port": 8787,
+  "host_allowlist": ["127.0.0.1", "localhost", "webui"],
+  "pools": {
+    "foxy": {
+      "label": "FoxyVPN",
+      "upstream": "http://mock:8080",
+      "ui_path": "foxyvpn-dashboard"
+    },
+    "urn": {
+      "label": "URnetwork",
+      "upstream": "http://mock:8080",
+      "ui_path": "urn-dashboard"
+    },
+    "ws": {
+      "label": "Windscribe",
+      "upstream": "http://mock:8080",
+      "ui_path": "windscribe-dashboard"
+    },
+    "vg": {
+      "_about": "The VPNGate dashboard is served statically at /p/vg/; /p/vg/api/* and /p/vg/ui-state proxy/aggregate against the mock.",
+      "label": "VPNGate",
+      "upstream": "http://mock:8080",
+      "controller": "http://mock:8080"
+    }
+  }
+}
