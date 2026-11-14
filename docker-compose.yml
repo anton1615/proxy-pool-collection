@@ -10,8 +10,13 @@
 # No build step: both services run the official python image directly against
 # a read-only bind mount of this checkout. PPC_CONFIG points at the example
 # config that is already inside the mount, so the first `up` needs no copy.
-# Edit docker/config.example.json (or mount your own file and repoint
-# PPC_CONFIG) to point the shell at real pools.
+# Do NOT add a second single-file volume under /app (e.g. mapping the host
+# example config to /app/docker/config.json): `.:/app:ro` makes /app read-only,
+# so Docker cannot create the nested mountpoint and container init fails with
+# "error mounting ... read-only file system". Reference an in-mount file via
+# PPC_CONFIG instead. `docker compose config -q` will NOT catch this.
+# Edit docker/config.example.json (or mount your own file OUTSIDE /app and
+# repoint PPC_CONFIG) to point the shell at real pools.
 
 services:
   webui:
