@@ -21,10 +21,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype):
-        if isinstance(body, str):
-            body = body.encode()
-        self.send_response(code)
+    def _send(self, body, ctype):
+        body = body.encode()
+        self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -34,18 +33,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/status":
-            return self._send(200, json.dumps({"count": 0, "clients": {}}),
+            return self._send(json.dumps({"count": 0, "clients": {}}),
                               "application/json")
         if path == "/nodes":
-            return self._send(200, json.dumps({"count": len(NODES), "nodes": NODES}),
+            return self._send(json.dumps({"count": len(NODES), "nodes": NODES}),
                               "application/json")
         if path == "/providers/proxies/hub":
-            return self._send(200, json.dumps({"proxies": []}), "application/json")
+            return self._send(json.dumps({"proxies": []}), "application/json")
         # Generic dashboard body for the three UI_HTML tabs and /p/vg/api/*.
         html = ("<!doctype html><meta charset=utf-8>"
                 "<title>Proxy Pool demo</title>"
                 "<p>Mock upstream — no real pool connected.</p>")
-        return self._send(200, html, "text/html; charset=utf-8")
+        return self._send(html, "text/html; charset=utf-8")
 
     def do_POST(self):
         return self.do_GET()

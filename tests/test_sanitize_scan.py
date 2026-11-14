@@ -52,5 +52,16 @@ class SanitizeScanTest(unittest.TestCase):
                                 for h in hits),
                             "a private literal under docker/ must be flagged")
 
+    def test_flags_allowlisted_literal_in_docker_tree(self):
+        # Pins docker/ being in FIRST_PARTY_TOP: a documented upstream literal
+        # is tolerated only in vendored trees, never in first-party docker/.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "docker"))
+            with open(os.path.join(root, "docker", "config.example.json"), "w") as f:
+                f.write("curl http://100.100.100.101:8080/register\n")
+            hits = sanitize_scan.scan(root)
+            self.assertTrue(any(h[0].startswith("docker" + os.sep) for h in hits),
+                            "an upstream literal under first-party docker/ must be flagged")
+
 if __name__ == "__main__":
     unittest.main()
