@@ -48,6 +48,12 @@ button[disabled]{opacity:.5;cursor:default}
 .card-actions{display:flex;gap:8px;margin-top:4px}
 .empty{color:var(--muted);padding:28px;text-align:center;
        border:1px dashed var(--line);border-radius:12px}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--card);
+       color:var(--fg);padding:18px 20px;width:min(430px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog h2{margin:0 0 10px;font-size:15px}
+dialog p{margin:0 0 14px;color:var(--muted);overflow-wrap:anywhere}
+.dlg-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
        background:var(--card);border:1px solid var(--line);border-radius:10px;
        padding:9px 14px;font-size:13px;box-shadow:0 8px 26px rgba(0,0,0,.25);
@@ -70,12 +76,22 @@ button[disabled]{opacity:.5;cursor:default}
 <main><div id="list"></div></main>
 <div id="busy"><span id="busytext">處理中…</span></div>
 <div id="toast"></div>
+
+<dialog id="dlg-del">
+  <h2>移除節點</h2>
+  <p id="del-who"></p>
+  <div class="dlg-actions">
+    <button data-close>取消</button>
+    <button class="danger" id="del-ok">確定移除</button>
+  </div>
+</dialog>
 <script>
 const BASE = location.pathname.slice(-1) === "/" ? location.pathname : location.pathname + "/";
 const API = BASE + "ui-state";
 const ROTATE = BASE + "api/rotate";
 const DELETE = BASE + "api/delete";
 let S = {clients: {}, nodes: [], host: ""};
+let target = null;
 
 const $ = s => document.querySelector(s);
 function el(tag, attrs, kids) {
@@ -108,7 +124,7 @@ function card(uid, rec) {
       : el("span", {className: "badge muted"}, ["狀態未知"]);
   const rotateBtn = el("button", {className: "primary", onclick: () => rotate(uid)},
                     ["隨機切換"]);
-  const removeBtn = el("button", {className: "danger", onclick: () => remove(uid)},
+  const removeBtn = el("button", {className: "danger", onclick: () => openDelete(uid, rec.port)},
                     ["移除"]);
   return el("div", {className: "card"}, [
     el("div", {className: "card-top"}, [el("span", {className: "uid"}, [uid]), badge]),
@@ -164,6 +180,13 @@ async function rotate(uid) {
   finally { busy(false); refresh(); }
 }
 
+function openDelete(uid, port) {
+  target = uid;
+  $("#del-who").textContent =
+    "確定要移除「" + uid + "」？會釋放它的端口 " + String(port ?? "-") + "，無法復原。";
+  $("#dlg-del").showModal();
+}
+
 async function remove(uid) {
   busy(true, "正在為「" + uid + "」釋放端口…");
   try {
@@ -173,8 +196,19 @@ async function remove(uid) {
   finally { busy(false); refresh(); }
 }
 $("#refresh").onclick = refresh;
+document.querySelectorAll("[data-close]").forEach(b => {
+  b.onclick = () => b.closest("dialog").close();
+});
+$("#del-ok").onclick = async () => {
+  if (!target) return;
+  const uid = target;
+  $("#dlg-del").close();
+  await remove(uid);
+};
 refresh();
-setInterval(refresh, 15000);
+setInterval(() => {
+  if (!document.querySelector("dialog[open]")) refresh();
+}, 15000);
 </script>
 </body>
 </html>

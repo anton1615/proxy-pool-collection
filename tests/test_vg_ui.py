@@ -35,13 +35,17 @@ class VgUiTest(unittest.TestCase):
 
 
     def test_card_buttons_call_global_handlers(self):
-        # A local const remove/rotate inside card() shadows the global handler;
-        # onclick closures then capture the button element -> TypeError on click.
+        # card() used to shadow remove/rotate with local consts -> TypeError.
+        # Remove opens a confirm dialog; del-ok calls remove() directly.
         js = re.search(r"<script>(.*?)</script>", self.src, re.S).group(1)
         harness = r'''
 const calls = [];
+const dialog = { textContent: "", className: "", showModal(){ calls.push("open") }, close(){} };
+const delOk = {};
+const generic = () => ({ textContent: "", className: "", replaceChildren(){}, append(){}, set onclick(f){} });
 global.document = {
-  querySelector: () => ({ textContent: "", className: "", replaceChildren(){}, append(){}, set onclick(f){} }),
+  querySelector: s => s === "#dlg-del" ? dialog : s === "#del-ok" ? delOk : generic(),
+  querySelectorAll: () => [],
   createElement: () => ({ kids: [], listeners: {}, nodeType: 1,
     setAttribute(k, v){ this[k] = v }, addEventListener(k, f){ this.listeners[k] = f },
     append(...c){ this.kids.push(...c) } }),
@@ -54,17 +58,30 @@ global.setTimeout = () => 0;
 __JS__
 rotate = uid => calls.push("rotate:" + uid);
 remove = uid => calls.push("remove:" + uid);
-const c = card("A", {});
+const c = card("A", {port: 7900});
 const actions = c.kids.find(k => k.className === "card-actions");
 actions.kids.forEach(b => b.listeners.click());
-console.log(calls.join(","));
+// remove button must open dialog, not delete yet
+console.log("after-card:" + calls.join(","));
+// empty target: confirming without a selection must not delete
+target = null;
+delOk.onclick();
+console.log("after-empty:" + calls.join(","));
+// real confirm: del-ok must call remove(A)
+target = "A";
+delOk.onclick();
+console.log("after-confirm:" + calls.join(","));
 '''
         p = "/tmp/ppc-vg-ui-click.js"
         with open(p, "w") as fh:
             fh.write(harness.replace("__JS__", js))
         r = subprocess.run(["node", p], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), "rotate:A,remove:A", r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "after-card:rotate:A,open",
+            "after-empty:rotate:A,open",
+            "after-confirm:rotate:A,open,remove:A",
+        ], r.stderr)
 
 if __name__ == "__main__":
     unittest.main()
