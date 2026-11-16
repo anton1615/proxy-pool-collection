@@ -106,9 +106,9 @@ function card(uid, rec) {
     : alive === false
       ? el("span", {className: "badge err"}, ["節點離線"])
       : el("span", {className: "badge muted"}, ["狀態未知"]);
-  const rotate = el("button", {className: "primary", onclick: () => rotate(uid)},
+  const rotateBtn = el("button", {className: "primary", onclick: () => rotate(uid)},
                     ["隨機切換"]);
-  const remove = el("button", {className: "danger", onclick: () => remove(uid)},
+  const removeBtn = el("button", {className: "danger", onclick: () => remove(uid)},
                     ["移除"]);
   return el("div", {className: "card"}, [
     el("div", {className: "card-top"}, [el("span", {className: "uid"}, [uid]), badge]),
@@ -116,7 +116,7 @@ function card(uid, rec) {
                                    el("span", {className: "v mono"}, [String(rec.port ?? "-")])]),
     el("div", {className: "row"}, [el("span", {className: "k"}, ["node"]),
                                    el("span", {className: "v mono"}, [rec.node || "-"])]),
-    el("div", {className: "card-actions"}, [rotate, remove]),
+    el("div", {className: "card-actions"}, [rotateBtn, removeBtn]),
   ]);
 }
 
