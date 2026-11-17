@@ -16,7 +16,7 @@
     },
     "ws": {
       "label": "Windscribe",
-      "upstream": "http://127.0.0.1:8096",
+      "upstream": "http://127.0.0.1:8094",
       "ui_path": "windscribe-dashboard"
     },
     "vg": {
