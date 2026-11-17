@@ -78,8 +78,7 @@ DEFAULT_LOG_DIR = os.path.join(HERE, "logs")
 DEFAULT_DB = os.path.join(HERE, "db.sqlite")
 DEFAULT_URNPROXY = os.environ.get("URNPROXY", os.path.expanduser("~/urnproxy"))
 HUB_OPEN = os.path.join(HERE, "hub-open.json")   # urn-hub.py's open set
-SCORE_TTL = 24 * 3600             # a speed score older than this is not "fresh"
-PICK_WEIGHTS = (0.80, 0.14, 0.06)  # tier 1 fresh scored / tier 2 older scored / tier 3 rest
+PICK_WEIGHTS = (1.0, 0.0)          # tier 1 any scored provider / tier 2 unmeasured fallback
 PICK_MEMORY = 100                  # never re-hand-out a node picked in the last N picks
 API_URL = "https://api.bringyour.com"
 DEFAULT_COUNTRY = "United States"
@@ -1248,17 +1247,16 @@ class Wrapper:
 
         Prefers urn-hub's open set (hub-open.json: seen in the latest global
         fetch AND not daemon-proven dead AND exit risk low). Inside it, a
-        weighted draw over trust tiers so freshly measured nodes dominate but
-        they never quietly disappear:
+        weighted draw over trust tiers:
 
-          tier 1  speed-measured less than a day ago  PICK_WEIGHTS[0]  (80%)
-          tier 2  measured, but older than a day      PICK_WEIGHTS[1]  (14%)
-          tier 3  never measured                      PICK_WEIGHTS[2]  (6%)
+          tier 1  speed-measured (fresh or stale)     PICK_WEIGHTS[0]  (100%)
+          tier 2  never measured                      PICK_WEIGHTS[1]  (0%)
 
-        Within a tier every provider is equally likely, so a repeatedly dying
-        tier-1 does not starve the number that can still be picked. Measured
-        nodes carried traffic 93%/90% of the time vs 40-60% for unmeasured
-        (serial probe, 2026-11-06).
+        Within a tier every provider is equally likely, so a tiny fresh
+        subset cannot dominate picks and a repeatedly dying node does not
+        starve the number that can still be picked. Measured nodes carried
+        traffic 93%/90% of the time vs 40-60% for unmeasured (serial probe,
+        2026-11-06).
 
         The last PICK_MEMORY picks are remembered and normally filtered out, so
         consecutive picks (the up-to-3 candidates of one /rotate) and
@@ -1270,17 +1268,16 @@ class Wrapper:
             # stale beyond one missed hub round: the fetcher died, use fallback
             if time.time() - doc["updated_at"] < 3900 and doc.get("providers"):
                 provs = doc["providers"]
-                cutoff = time.time() - SCORE_TTL
                 good = [p for p in provs
                         if p.get("sp") is not None and not p.get("fail")]
-                fresh = [p for p in good if (p.get("sp_ts") or 0) > cutoff]
-                stale = [p for p in good if (p.get("sp_ts") or 0) <= cutoff]
                 rest = [p for p in provs
                         if p.get("sp") is None or p.get("fail")]
                 # weighted draw over trust, then a uniform pick inside the tier;
-                # weights are renormalized over the tiers that are not empty
-                tiers = [(t, w) for t, w in zip((fresh, stale, rest),
-                                                PICK_WEIGHTS) if t]
+                # a zero-weight tier only serves when no positive tier is left
+                tiers = [(t, w) for t, w in zip((good, rest),
+                                                PICK_WEIGHTS) if t and w]
+                if not tiers and rest:
+                    tiers = [(rest, 1.0)]
                 if tiers:
                     with self._recent_lock:
                         pool = [p for p in random.choices(
