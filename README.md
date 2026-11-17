@@ -1,11 +1,11 @@
 # 🗂 proxy-pool-collection
 
-**Four self-hosted proxy pools, one URL.** `proxy-pool-collection` wraps
-four existing, separate services — [foxyvpn-pool][foxy], [urn-pool][urn],
-[windscribe-pool][windscribe], and a first-party shared-mihomo VPNGate pool —
-behind a single stdlib **reverse proxy** and one web page: a left sidebar
-switches pools with no page reload, and each pool keeps its own dashboard
-(unchanged UI) inside the same tab.
+**Five self-hosted proxy pools, one URL.** `proxy-pool-collection` wraps
+five existing, separate services — [foxyvpn-pool][foxy], [urn-pool][urn],
+[windscribe-pool][windscribe], a first-party shared-mihomo VPNGate pool, and a
+Rayobyte quota pool — behind a single stdlib **reverse proxy** and one web
+page: a left sidebar switches pools with no page reload, and each pool keeps
+its own dashboard (unchanged UI) inside the same tab.
 
 <p align="center">
   <img src="docs/images/dashboard-windscribe.png" alt="Proxy Pool Collection — Windscribe tab: one card per client with rotate, quota and node health; identifiers masked." width="100%">
@@ -28,9 +28,9 @@ extended with a first-party reverse proxy and a first-party VPNGate dashboard.
 
 ## ✨ Highlights
 
-- 🖥 **One page, four pools** — FoxyVPN, URnetwork, Windscribe and VPNGate
-  behind a single URL with a left sidebar; each tab is its own dashboard,
-  byte-identical upstream where a `UI_HTML` exists
+- 🖥 **One page, five pools** — FoxyVPN, URnetwork, Windscribe, VPNGate and
+  Rayobyte behind a single URL with a left sidebar; each tab is its own
+  dashboard, byte-identical upstream where a `UI_HTML` exists
 - 🔁 **VPNGate is a first-party pool, not scraped wrappers** — mihomo
   `mixed` listeners, `register.py` (`/register` `/rotate` `/node` `/status`),
   a provider generator filtering the official VPNGate node lists, an official-only
@@ -51,21 +51,21 @@ extended with a first-party reverse proxy and a first-party VPNGate dashboard.
 
 ## 🤔 Why wrap pools this way?
 
-Four pools solve four different problems, and each one already ships a good
-dashboard. What's missing is the \*\*one-URL switchboard\*\* and a
-reproducible, credential-free repository describing all four.
+Five pools solve five different problems; the three vendored upstreams each
+already ship a good dashboard. What's missing is the \*\*one-URL switchboard\*\*
+and a reproducible, credential-free repository describing them all.
 
 | Concern | Separate dashboards | Proxy Pool Collection |
 |---|---|---|
-| One status page | Visit 3–4 URLs, remember 4 tokens | One page, one URL, four sidebar tabs |
-| Fresh clone reproduces | Four different repos, differing deploy docs | One clone, all four architectures versioned together |
+| One status page | Visit 3–5 URLs, remember 5 tokens | One page, one URL, five sidebar tabs |
+| Fresh clone reproduces | Five separate services, differing deploy docs | One clone, all five pools versioned together |
 | VPNGate dashboard | None upstream (first-party only) | Card dashboard with Rotate, matches the family |
 | Credentials in repo | Each pool's README says "bring your own" | Every live value externalized; a scanner proves it |
 | Upstream updates | Pull four repos, reconcile four layouts | Subtrees pinned to SHAs; update one at a time |
 
-> The 3 upstream pools ship their own `UI_HTML`; this repo mounts them under a
-> path prefix and proxies everything the relative-URL dashboard needs. The 4th
-> pool's dashboard is new but copied from the same house style.
+> The 3 vendored upstreams ship their own `UI_HTML`; this repo mounts them under
+> a path prefix and proxies everything the relative-URL dashboard needs. The
+> VPNGate and Rayobyte dashboards are first-party, in the same house style.
 
 ## 🧠 How it works
 
@@ -77,6 +77,8 @@ flowchart LR
   S -->|/p/ws/*| W[windscribe-pool · OpenVPN tunnels · :8094]
   S -->|/p/vg/* static| V[VPNGate ui.html · cards + Rotate]
   V -->|/p/vg/api/*| R[register.py :8095]
+  S -->|/p/ray/* static| Y[Rayobyte ui.html · read-only cards]
+  Y -->|/p/ray/api/*| RP[raypool_svc.py :8096]
   R --> C[mihomo external-controller :7910]
   H[vpngate-hub · official sources] --> J[(publish/hub-nodes.json)]
   J --> G[gen-provider.py · clean filter]
@@ -90,11 +92,11 @@ Two layers, both self-contained:
 1. **Control planes** — each pool is a small stdlib service that turns a
    shared account/token pool into per-client SOCKS5 exits (byte-relay swap,
    quota self-management, stable ports).
-2. **Unified view** — a reverse proxy serving four tabs; the VPNGate pool
+2. **Unified view** — a reverse proxy serving five tabs; the VPNGate pool
    exposes no quota concept, so its cards show exit node + a single Rotate
-   button (≈ urn-pool's "rotate, no picker" UX).
+   button (≈ urn-pool's "rotate, no picker" UX); the Rayobyte tab is read-only.
 
-## 🦊 FoxyVPN / 🌀 URnetwork / 🐋 Windscribe / 🌐 VPNGate
+## 🦊 FoxyVPN / 🌀 URnetwork / 🐋 Windscribe / 🌐 VPNGate / 🛰️ Rayobyte
 
 | Tab | Source | UI |
 |---|---|---|
@@ -102,6 +104,7 @@ Two layers, both self-contained:
 | 🌀 URnetwork | `pools/urn-pool/` (subtree, pinned) | upstream embedded `UI_HTML` |
 | 🐋 Windscribe | `pools/windscribe-pool/` (subtree, pinned) | upstream embedded `UI_HTML` |
 | 🌐 VPNGate | `shared-mihomo/` (first-party) | `shared-mihomo/webui/ui.html` |
+| 🛰️ Rayobyte | host `ray-pool` (external API) | `webui/ray.html` (first-party, read-only) |
 
 Three upstream pools are vendored **byte-identical** as git subtrees pinned to
 SHAs pinned in each subtree. The rewind point for every
@@ -142,7 +145,7 @@ cd proxy-pool-collection
 docker compose up
 ```
 
-Open `http://127.0.0.1:8787/`. All four tabs render with mock data — a single
+Open `http://127.0.0.1:8787/`. All five tabs render with mock data — a single
 stdlib service stands in for every upstream, so no real pool accounts, VPN
 tunnels, or mihomo are involved. `docker compose down` stops the demo. The
 stack runs the same `webui/server.py` unchanged from the official
@@ -167,14 +170,17 @@ sudo systemctl enable --now shared-mihomo-reg.service
 
 ## 🖥️ Web UI
 
-One page; left sidebar; four tabs. Each tab is the pool's own dashboard —
+One page; left sidebar; five tabs. Three tabs show the pool's own dashboard —
 no rewrite, no visual translation, because every upstream `UI_HTML` uses the
-same relative-`BASE` convention.
+same relative-`BASE` convention; VPNGate and Rayobyte are first-party dashboards
+in the same style.
 
 - 🦊 FoxyVPN — clients, ports, origins, quota, region switch
 - 🌀 URnetwork — clients, ports, exits, quota left, relays
 - 🐋 Windscribe — cards with ports, exit, quota used, node health
 - 🌐 VPNGate — cards with ports, exit node, alive badge, **Rotate** button
+- 🛰️ Rayobyte — read-only quota cards: accounts, live endpoints, remaining MB,
+  client ports/nodes
 
 The screenshot at the top of this file is a live Windscribe tab.
 
@@ -227,7 +233,7 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 ├── README.md
 ├── docker-compose.yml          # one-command demo stack
 ├── docker/                     # demo-only config + single mock upstream
-│   ├── config.example.json     # all four pools -> one mock on :8080
+│   ├── config.example.json     # all five pools -> one mock on :8080
 │   └── mock_upstream.py        # stdlib HTTP mock
 ├── webui/                      # the unified shell
 │   ├── server.py               # stdlib reverse proxy (SSRF-safe)
@@ -258,7 +264,7 @@ See `shared-mihomo/api/register.service.example` for the systemd unit.
 python3 -m unittest discover -s tests -v
 ```
 
-Playwright browser smoke (desktop + mobile, four tabs, zero JS errors):
+Playwright browser smoke (desktop + mobile, five tabs, zero JS errors):
 
 ```bash
 python3 -m unittest tests.test_integration_smoke -v

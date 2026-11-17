@@ -1,8 +1,8 @@
 # One-command demo for proxy-pool-collection.
-#   docker compose up        -> http://127.0.0.1:8787/ (four tabs, mock data)
+#   docker compose up        -> http://127.0.0.1:8787/ (five tabs, mock data)
 #   docker compose down
 #
-# This is demo/dev only: the four upstreams are a single stdlib mock, no real
+# This is demo/dev only: the five upstreams are a single stdlib mock, no real
 # pool accounts, VPN tunnels or mihomo are involved. The shell is an
 # UNAUTHENTICATED reverse proxy, so the port is published on loopback only.
 # Never change the publish to a bare "8787:8787" on an untrusted network.

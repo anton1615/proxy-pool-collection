@@ -1,6 +1,6 @@
-"""End-to-end smoke: one URL, four tabs, VPNGate Rotate visible.
+"""End-to-end smoke: one URL, five tabs, VPNGate Rotate + Rayobyte cards visible.
 
-Starts the real webui/server.py with four stub upstreams (only each pool's
+Starts the real webui/server.py with five stub upstreams (only each pool's
 external API is stubbed; the dashboard HTML/JS is the shipped real file), then
 drives it with Playwright at desktop and mobile widths.
 """
@@ -76,6 +76,7 @@ class IntegrationSmokeTest(unittest.TestCase):
                 "ws": {"label": "Windscribe", "upstream": base["ws"], "ui_path": "tok"},
                 "vg": {"label": "VPNGate", "upstream": "http://127.0.0.1:%d" % cls.reg.server_address[1],
                        "controller": "http://127.0.0.1:1"},
+                "ray": {"label": "Rayobyte", "upstream": "http://127.0.0.1:%d" % cls.reg.server_address[1]},
             },
         }
         fd, cls.cfg_path = tempfile.mkstemp(suffix=".json")
@@ -108,7 +109,7 @@ class IntegrationSmokeTest(unittest.TestCase):
                     p = os.path.join(root, fn)
                     subprocess.run([sys.executable, "-m", "py_compile", p], check=True)
 
-    def test_four_tabs_and_rotate_in_browser(self):
+    def test_five_tabs_and_rotate_in_browser(self):
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -120,10 +121,10 @@ class IntegrationSmokeTest(unittest.TestCase):
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.goto(self.url, wait_until="domcontentloaded")
             page.wait_for_selector("nav button")
-            self.assertEqual(page.locator("nav button").count(), 4)
+            self.assertEqual(page.locator("nav button").count(), 5)
             labels = page.locator("nav button").all_text_contents()
             self.assertEqual([t.strip() for t in labels],
-                             ["FoxyVPN", "URnetwork", "Windscribe", "VPNGate"])
+                             ["FoxyVPN", "URnetwork", "Windscribe", "VPNGate", "Rayobyte"])
             # Switch to the VPNGate tab and verify the real shipped UI renders.
             page.locator("nav button[data-pool='vg']").click()
             page.wait_for_timeout(400)
@@ -132,6 +133,14 @@ class IntegrationSmokeTest(unittest.TestCase):
             self.assertIn("隨機切換", frame.locator("body").inner_text())
             self.assertEqual(frame.locator("select").count(), 0)
             self.assertNotIn("quota", frame.locator("body").inner_text().lower())
+            # Rayobyte tab: read-only cards render from the two JSON endpoints.
+            page.locator("nav button[data-pool='ray']").click()
+            page.wait_for_timeout(400)
+            frame.locator(".card, .empty").first.wait_for(timeout=5000)
+            self.assertIn("alpha", frame.locator("body").inner_text())
+            self.assertIn("帳號", frame.locator("body").inner_text())
+            self.assertEqual(frame.locator("button").count(), 1)  # refresh only
+            self.assertEqual(frame.locator("select").count(), 0)
             # Other tabs still load.
             page.locator("nav button[data-pool='urn']").click()
             page.wait_for_timeout(300)
@@ -140,7 +149,7 @@ class IntegrationSmokeTest(unittest.TestCase):
             page.set_viewport_size({"width": 380, "height": 720})
             page.wait_for_timeout(200)
             self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 380)
-            page.screenshot(path="/tmp/ppc-four-tabs.png", full_page=True)
+            page.screenshot(path="/tmp/ppc-five-tabs.png", full_page=True)
             self.assertEqual(errors, [], "no page JS errors")
             browser.close()
 

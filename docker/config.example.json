@@ -1,5 +1,5 @@
 {
-  "_about": "Demo config mounted at PPC_CONFIG by docker-compose.yml. All four upstreams and the VPNGate controller point at the single mock service on one port; Docker network aliases resolve names, not ports. Copy/edit for your own upstreams; never commit real hosts or credentials.",
+  "_about": "Demo config mounted at PPC_CONFIG by docker-compose.yml. All five upstreams and the VPNGate controller point at the single mock service on one port; Docker network aliases resolve names, not ports. Copy/edit for your own upstreams; never commit real hosts or credentials.",
   "listen": "0.0.0.0",
   "port": 8787,
   "host_allowlist": ["127.0.0.1", "localhost", "webui"],
@@ -24,6 +24,11 @@
       "label": "VPNGate",
       "upstream": "http://mock:8080",
       "controller": "http://mock:8080"
+    },
+    "ray": {
+      "_about": "The Rayobyte dashboard is served statically at /p/ray/; /p/ray/api/* proxies to the mock.",
+      "label": "Rayobyte",
+      "upstream": "http://mock:8080"
     }
   }
 }

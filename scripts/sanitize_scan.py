@@ -21,7 +21,7 @@ import sys
 
 FIRST_PARTY_TOP = {"webui", "shared-mihomo", "windscribe-host-webui", "scripts", "docker"}
 FIRST_PARTY_FILES = {"README.md", "LICENSE", ".gitignore"}
-SKIP_TOP = {"docs", "tests"}
+SKIP_TOP = {"docs", "tests", "graphify-out"}  # generated graph artifact; never shipped
 SKIP_FILES = {"sanitize_scan.py"}
 VENDOR_PREFIX = "pools/"
 

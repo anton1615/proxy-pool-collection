@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""One-URL shell for the four proxy pools.
+"""One-URL shell for the five proxy pools.
 
 Serves the tab shell at /, reverse-proxies /p/<pool>/... to each configured
-upstream, and serves the VPNGate dashboard statically at /p/vg/.
+upstream, and serves the VPNGate and Rayobyte dashboards statically.
 
 Security: upstream URLs are built by string concatenation (never urljoin), the
 stripped path is validated against traversal/protocol-relative forms, only an
@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.environ.get("PPC_CONFIG", os.path.join(BASE, "config.json"))
 VG_UI = os.path.join(os.path.dirname(BASE), "shared-mihomo", "webui", "ui.html")
+RAY_UI = os.path.join(BASE, "ray.html")
 
 FORWARD_REQ_HEADERS = {"Accept", "Accept-Language", "Content-Type", "Content-Length",
                        "Cache-Control", "If-None-Match", "If-Modified-Since"}
@@ -92,16 +93,16 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._send(500, "shell unavailable: %s" % exc)
 
-    def _vg_static(self, rest):
-        # /p/vg/ and /p/vg/<static file> render the first-party dashboard.
+    def _static_ui(self, path, rest, label):
+        # /p/<pool>/ and /p/<pool>/index.html render a first-party dashboard.
         if rest and rest != "index.html":
             self._send(404, "not found")
             return
         try:
-            with open(VG_UI, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 self._send(200, fh.read(), "text/html; charset=utf-8")
         except OSError:
-            self._send(502, "VPNGate dashboard not built yet")
+            self._send(502, label + " dashboard not built yet")
 
     def _pools_js(self, cfg):
         pools = {}
@@ -190,10 +191,20 @@ class Handler(BaseHTTPRequestHandler):
             if rest == "ui-state":
                 return self._vg_ui_state(cfg)
             if rest == "" or rest == "index.html":
-                return self._vg_static(rest)
+                return self._static_ui(VG_UI, rest, "VPNGate")
             # /p/vg/api/*
             if rest.startswith("api/"):
                 return self._proxy(cfg, "vg", rest[len("api/"):], parsed.query, method)
+            return self._send(404, "not found")
+        if path == "/p/ray" or path.startswith("/p/ray/"):
+            rest = path[len("/p/ray/"):]
+            if rest.startswith("/"):
+                return self._send(400, "bad path")
+            if rest == "" or rest == "index.html":
+                return self._static_ui(RAY_UI, rest, "Rayobyte")
+            # /p/ray/api/*
+            if rest.startswith("api/"):
+                return self._proxy(cfg, "ray", rest[len("api/"):], parsed.query, method)
             return self._send(404, "not found")
         if path.startswith("/p/"):
             parts = path[len("/p/"):].split("/", 1)

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Rayobyte 額度池</title>
+<style>
+:root{
+  --bg:#0f1115; --fg:#e8eaf0; --muted:#8b93a7; --line:#232838; --card:#161a24;
+  --accent:#4da3ff; --ok:#3ecf8e; --warn:#d8a93b; --err:#e5544b;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f5f6fa;--fg:#161a22;--muted:#5d6577;--line:#e1e4ec;--card:#fff;
+        --accent:#1f6feb;--ok:#17945c;--err:#c0342c}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+       justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:18px;font-weight:650}
+.sub{color:var(--muted);font-size:12px}
+#chips,#nodes{display:flex;flex-wrap:wrap;gap:8px;padding:14px 22px 0}
+#nodes{padding-top:10px}
+.chip{border:1px solid var(--line);background:var(--card);border-radius:999px;
+      padding:3px 11px;font-size:12px;color:var(--muted)}
+.chip b{color:var(--fg);font-weight:600;margin-left:4px}
+.chip.node{color:var(--fg);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+main{padding:14px 22px 48px}
+.note{color:var(--muted);font-size:12px;margin:10px 0 0}
+#list{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+      padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uid{font-weight:650;font-size:15px;overflow-wrap:anywhere}
+.row{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.row .k{color:var(--muted);flex:0 0 74px}
+.row .v{overflow-wrap:anywhere}
+code,.mono{font:12.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.empty{color:var(--muted);padding:28px;text-align:center;
+       border:1px dashed var(--line);border-radius:12px}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+       background:var(--card);border:1px solid var(--line);border-radius:10px;
+       padding:9px 14px;font-size:13px;box-shadow:0 8px 26px rgba(0,0,0,.25);
+       opacity:0;pointer-events:none;transition:opacity .18s;max-width:90vw}
+#toast.show{opacity:1}
+#toast.err{color:var(--err);border-color:var(--err)}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Rayobyte 額度池</h1>
+    <div class="sub" id="hostline">每 15 秒自動更新</div>
+  </div>
+  <button id="refresh" style="font:inherit;border-radius:8px;border:1px solid var(--line);
+         background:transparent;color:var(--fg);padding:6px 12px;cursor:pointer"
+         onmouseover="this.style.borderColor='var(--accent)'"
+         onmouseout="this.style.borderColor='var(--line)'">重新整理</button>
+</header>
+<div id="chips"></div>
+<div id="nodes"></div>
+<main>
+  <div id="list"></div>
+  <p class="note">唯讀檢視 · 配額與埠操作走 ray-pool API（:8096），不在此頁執行。</p>
+</main>
+<div id="toast"></div>
+<script>
+const BASE = location.pathname.slice(-1) === "/" ? location.pathname : location.pathname + "/";
+const STATUS = BASE + "api/status";
+const NODES = BASE + "api/nodes";
+let S = {clients: {}, nodes: [], accounts: 0, entries: 0, remaining_kb: 0, dead_accounts: 0};
+
+const $ = s => document.querySelector(s);
+function el(tag, attrs, kids) {
+  const e = document.createElement(tag);
+  for (const k in attrs || {}) {
+    if (k === "style") e.setAttribute("style", attrs[k]);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+    else e[k] = attrs[k];
+  }
+  (kids || []).forEach(c => e.append(c.nodeType ? c : document.createTextNode(c)));
+  return e;
+}
+function toast(msg, bad) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (bad ? " err" : "");
+  setTimeout(() => t.className = "", 2600);
+}
+function fmtMb(kb) {
+  return kb == null ? "-" : (kb / 1024).toFixed(1) + " MB";
+}
+function fmtWhen(ts) {
+  if (!ts) return "-";
+  try { return new Date(ts * 1000).toLocaleString("zh-TW", {hour12: false}); }
+  catch (e) { return "-"; }
+}
+
+function card(uid, rec) {
+  return el("div", {className: "card"}, [
+    el("div", {className: "card-top"}, [el("span", {className: "uid"}, [uid])]),
+    el("div", {className: "row"}, [el("span", {className: "k"}, ["port"]),
+                                   el("span", {className: "v mono"}, [String(rec.port ?? "-")])]),
+    el("div", {className: "row"}, [el("span", {className: "k"}, ["node"]),
+                                   el("span", {className: "v mono"}, [rec.node || "-"])]),
+    el("div", {className: "row"}, [el("span", {className: "k"}, ["加入"]),
+                                   el("span", {className: "v"}, [fmtWhen(rec.added)])]),
+  ]);
+}
+
+function render() {
+  const clients = S.clients || {};
+  const uids = Object.keys(clients).sort();
+  $("#chips").replaceChildren(
+    el("span", {className: "chip"}, ["帳號 ", el("b", {}, [String(S.accounts ?? "-")])]),
+    el("span", {className: "chip"}, ["活端點 ", el("b", {}, [String(S.entries ?? "-")])]),
+    el("span", {className: "chip"}, ["剩餘額度 ", el("b", {}, [fmtMb(S.remaining_kb)])]),
+    el("span", {className: "chip"}, ["停用帳號 ", el("b", {}, [String(S.dead_accounts ?? "-")])]),
+  );
+  const nodes = S.nodes || [];
+  $("#nodes").replaceChildren(
+    ...(nodes.length
+      ? nodes.map(n => el("span", {className: "chip node"}, [n]))
+      : [el("span", {className: "chip"}, ["無活端點"])]),
+  );
+  const list = $("#list");
+  list.replaceChildren();
+  if (!uids.length) {
+    list.append(el("div", {className: "empty"}, ["尚無客戶端"]));
+    return;
+  }
+  for (const uid of uids) list.append(card(uid, clients[uid]));
+}
+
+async function api(url) {
+  const r = await fetch(url, {cache: "no-store"});
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+let lastState = "";
+async function refresh() {
+  try {
+    const [status, nodes] = await Promise.all([api(STATUS), api(NODES)]);
+    const merged = {...status, nodes: nodes.nodes || []};
+    const raw = JSON.stringify(merged);
+    if (raw === lastState) return;  // no DOM churn when nothing changed
+    lastState = raw;
+    S = merged;
+    render();
+  }
+  catch (e) { toast("載入失敗：" + e.message, true); }
+}
+$("#refresh").onclick = refresh;
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

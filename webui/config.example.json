@@ -24,6 +24,11 @@
       "label": "VPNGate",
       "upstream": "http://127.0.0.1:8095",
       "controller": "http://127.0.0.1:7910"
+    },
+    "ray": {
+      "_about": "The Rayobyte dashboard is served statically at /p/ray/ by this server; /p/ray/api/* proxies to raypool_svc.py.",
+      "label": "Rayobyte",
+      "upstream": "http://127.0.0.1:8096"
     }
-  }
+}
 }
