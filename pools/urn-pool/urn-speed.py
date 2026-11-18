@@ -35,12 +35,12 @@ EGRESS_PROXY = os.environ.get("URN_SPEED_PROXY", "")
 API = "https://api.bringyour.com"
 
 BATCH = 6
-WORKERS = 3
+WORKERS = int(os.environ.get("SPEED_WORKERS", "3"))
 PORT_BASE = 21500
 MIN_QUOTA = 8 * 1024 ** 3        # drop accounts below this
 DAILY_GB = float(os.environ.get("SPEED_DAILY_GB", "300"))
-LOAD_LIMIT = 4.0                 # loadavg guard (ib1: 4 cores, shares the pool)
-FRESH_SECS = 48 * 3600           # only test providers seen recently
+LOAD_LIMIT = float(os.environ.get("SPEED_LOAD_LIMIT", "4.0"))
+ROUND_SLACK = 180                # only providers from the latest hub round; 48h window was 96% offline IDs
 FAIL_MAX = 5                     # consecutive dead dials -> cooldown
 FAIL_COOLDOWN = 24 * 3600
 READY_TIMEOUT = 45.0
@@ -205,13 +205,14 @@ class Accounts:
 
 def pick_due(conn: "Conn", n: int) -> list[str]:
     now = time.time()
+    ref = conn.q("SELECT MAX(last_seen) FROM providers")[0][0] or now
     return [r[0] for r in conn.q(
         """SELECT client_id FROM providers
            WHERE last_seen > ?
            AND NOT (sp_fail >= ? AND sp_ts > ?)
            ORDER BY CASE WHEN sp_ts IS NULL THEN 0 ELSE 1 END, sp_ts ASC
            LIMIT ?""",
-        (now - FRESH_SECS, FAIL_MAX, now - FAIL_COOLDOWN, n))]
+        (ref - ROUND_SLACK, FAIL_MAX, now - FAIL_COOLDOWN, n))]
 
 
 def socks_alive(port: int, timeout: float = 10.0) -> tuple[bool, float]:
@@ -398,11 +399,23 @@ def test_provider(conn: sqlite3.Connection, accounts: Accounts,
         slot_q.put(port)
 
 
+def free_ports() -> None:
+    """Kill stale adapters from a previous killed run: they keep the listen
+    port, so a new spawn bind-fails but the port still answers SOCKS ->
+    every test reports the dead provider's backend as dead."""
+    for i in range(WORKERS):
+        port = PORT_BASE + i
+        subprocess.run(["pkill", "-f", f"127.0.0.1:{port} --provider-id"],
+                       check=False, capture_output=True)
+    time.sleep(0.2)
+
+
 def main() -> int:
     conn = open_db()
     jwts = load_jwt_cache(conn)
     accounts = Accounts(conn, jwts)
     slot_q: queue.Queue = queue.Queue()
+    free_ports()
     for i in range(WORKERS):
         slot_q.put(PORT_BASE + i)
     from concurrent.futures import ThreadPoolExecutor

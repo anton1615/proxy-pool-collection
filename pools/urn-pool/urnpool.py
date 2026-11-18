@@ -507,6 +507,9 @@ class Wrapper:
         # plain uniform pick re-hands the same node constantly. Remembering the
         # picks makes the sequence look "without replacement" instead.
         self._recent_picks: deque[str] = deque(maxlen=PICK_MEMORY)
+        # exit IPs already handed out; one IP can back many provider ids, and
+        # rotating between ids of the same IP would not change the exit
+        self._recent_ips: deque[str] = deque(maxlen=PICK_MEMORY)
         self._recent_lock = threading.Lock()
 
     # -- account supply ---------------------------------------------------
@@ -1252,15 +1255,16 @@ class Wrapper:
           tier 1  speed-measured (fresh or stale)     PICK_WEIGHTS[0]  (100%)
           tier 2  never measured                      PICK_WEIGHTS[1]  (0%)
 
-        Within a tier every provider is equally likely, so a tiny fresh
-        subset cannot dominate picks and a repeatedly dying node does not
-        starve the number that can still be picked. Measured nodes carried
-        traffic 93%/90% of the time vs 40-60% for unmeasured (serial probe,
-        2026-11-06).
+        Inside a tier, candidates are grouped by exit IP (a provider whose IP
+        is unknown is its own group), one group is drawn uniformly, then one
+        provider from it: many provider ids can share one exit IP, and picking
+        between them would not change the exit. Measured nodes carried traffic
+        93%/90% of the time vs 40-60% for unmeasured (serial probe, 2026-11-06).
 
-        The last PICK_MEMORY picks are remembered and normally filtered out, so
-        consecutive picks (the up-to-3 candidates of one /rotate) and
-        concurrent rotates do not keep re-handing the same node.
+        The last PICK_MEMORY provider ids and exit IPs are remembered and
+        normally filtered out, so consecutive picks (the up-to-3 candidates of
+        one /rotate) and concurrent rotates do not keep re-handing the same
+        node or the same exit.
         """
         try:
             with open(HUB_OPEN, encoding="utf-8") as fh:
@@ -1280,14 +1284,28 @@ class Wrapper:
                     tiers = [(rest, 1.0)]
                 if tiers:
                     with self._recent_lock:
-                        pool = [p for p in random.choices(
+                        cand = random.choices(
                             [t for t, _ in tiers],
                             weights=[w for _, w in tiers])[0]
-                            if p["id"] not in self._recent_picks]
-                        if not pool:
-                            pool = [p for p in tiers[0][0]]
-                        picked = random.choice(pool)
+                        # one draw per exit IP: group candidates by IP (a
+                        # provider without a known IP is its own group), drop
+                        # recent ids/IPs, then pick a group and a member
+                        groups: dict[str, list] = {}
+                        for p in cand:
+                            if p["id"] in self._recent_picks:
+                                continue
+                            key = p.get("ip") or p["id"]
+                            if key in self._recent_ips:
+                                continue
+                            groups.setdefault(key, []).append(p)
+                        if not groups:
+                            for p in tiers[0][0]:
+                                groups.setdefault(p.get("ip") or p["id"],
+                                                  []).append(p)
+                        key = random.choice(list(groups))
+                        picked = random.choice(groups[key])
                         self._recent_picks.append(picked["id"])
+                        self._recent_ips.append(key)
                         return picked["id"]
         except (OSError, ValueError, KeyError):
             pass

@@ -206,7 +206,7 @@ def page_country(conn: sqlite3.Connection, jwts: JwtPool, loc: dict) -> int:
 def publish(conn: sqlite3.Connection, round_start: float) -> int:
     rows = conn.execute(
         """SELECT p.client_id, p.cc, p.city, p.region, p.sp_ewma, e.risk,
-                  p.sp_fail, p.sp_ts
+                  p.sp_fail, p.sp_ts, p.exit_ip
            FROM providers p LEFT JOIN exits e ON e.ip = p.exit_ip
            WHERE p.last_seen > ? AND p.sp_fail < ?
              AND (e.risk IS NULL OR e.risk < ?)
@@ -218,7 +218,9 @@ def publish(conn: sqlite3.Connection, round_start: float) -> int:
                           "sp": round(r[4], 1) if r[4] is not None else None,
                           "risk": r[5],
                           "fail": r[6],
-                          "sp_ts": int(r[7]) if r[7] is not None else None}
+                          "sp_ts": int(r[7]) if r[7] is not None else None,
+                          # exit IP: rotate dedups picks on it, one IP = one draw
+                          "ip": r[8]}
                          for r in rows]}
     # shrink guard: a broken round must not gut the open set
     try:
